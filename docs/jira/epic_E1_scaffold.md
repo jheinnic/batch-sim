@@ -1,0 +1,72 @@
+# BSIM-E1 — Project Scaffold & Tooling
+
+---
+
+## BSIM-1 — Initialize repository and package structure
+
+**Type:** Task | **Priority:** Highest | **Status:** Done
+
+**Description:**
+Create the Git repository, Python package layout, and dependency manifest. The directory
+structure must support clean separation of the generator, scheduler, core simulation,
+registry, and metrics layers.
+
+**Acceptance Criteria:**
+- Git repo exists at /home/ionadmin/Git/batch-sim with main branch
+- `pyproject.toml` defines all dependencies (simpy, numpy, scipy, pandas, matplotlib,
+  seaborn, pydantic, rich, pytest)
+- Package installs cleanly with `pip install -e .`
+- `pytest` runs (zero tests, zero failures)
+
+---
+
+## BSIM-2 — Define configuration schema
+
+**Type:** Task | **Priority:** High | **Status:** Done
+**Depends on:** BSIM-1
+
+**Description:**
+Define and validate all configuration objects using Pydantic. Configuration covers:
+centroid definitions, instance type registry, scheduler parameters (panic threshold,
+warmup delay, SLA target), and experiment sweep parameters.
+
+**Acceptance Criteria:**
+- `CentroidConfig` validates all seven centroid parameters including CPU stage array structure
+- `InstanceTypeConfig` covers RAM, vCPU, family, and hourly price
+- `SchedulerConfig` covers panic_threshold, warmup_delay_seconds, sla_target_seconds, max_retries
+- `ExperimentConfig` covers event_list_path, scheduler_type, and parameter sweep range
+- Invalid configs raise clear validation errors with field-level messages
+- All models serialize to/from JSON
+
+---
+
+## BSIM-3 — Logging and CLI harness
+
+**Type:** Task | **Priority:** Medium | **Status:** Done
+**Depends on:** BSIM-1
+
+**Description:**
+Set up a top-level CLI with subcommands for the two pipeline stages: `generate`,
+`simulate`, `compare`, `experiment`, and `plot`.
+
+**Acceptance Criteria:**
+- `python -m batch_sim generate --config <path> --output <path>` invokes the generator
+- `python -m batch_sim simulate --events <path> --scheduler <batch|k8s> ...` invokes scheduler
+- `python -m batch_sim experiment ...` runs the full threshold sweep
+- `rich` progress display shown during experiment runs
+
+---
+
+## BSIM-4 — Pytest fixtures and test data
+
+**Type:** Task | **Priority:** Medium | **Status:** Done
+**Depends on:** BSIM-2
+
+**Description:**
+Create shared pytest fixtures covering a minimal valid centroid config, a small
+synthetic event list (30-minute horizon, 2 centroids), and a minimal instance registry.
+
+**Acceptance Criteria:**
+- Fixtures defined in `tests/conftest.py`
+- Synthetic event list covers all four job phases and two centroid types
+- All test files import from conftest without duplication
