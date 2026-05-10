@@ -1,0 +1,122 @@
+"""BSIM-20 through 24: AWS Batch Scheduler."""
+from __future__ import annotations
+import uuid, random
+from typing import Optional
+import simpy
+from batch_sim.core.engine import NodeModel, JobQueue, Priority, QueueEntry, OverloadHandler, run_job_process
+from batch_sim.core.schemas import SchedulerConfig
+from batch_sim.generator.job_spec import JobSpec
+from batch_sim.metrics.collector import MetricsCollector, NodeState as NodeStateEnum
+from batch_sim.registry.instance_registry import InstanceRegistry, NodeCostAccruer
+
+
+class BatchScheduler:
+    def __init__(self, cfg, registry, metrics, rng=None, os_overhead_gb=0.0):
+        self.cfg = cfg; self.registry = registry; self.metrics = metrics
+        self.rng = rng or random.Random(42); self.os_overhead_gb = os_overhead_gb
+        self._queue = JobQueue(); self._nodes = {}; self._accruers = {}
+        self._reserved = {}; self._overload_handler = None; self._panic_monitors = {}
+
+    def _setup(self, env):
+        self._env = env
+        self._overload_handler = OverloadHandler(
+            metrics=self.metrics, scheduler_cfg=self.cfg,
+            replay_queue=self._queue, rng=self.rng)
+
+    def on_job_arrival(self, env, job, arrival_time):
+        if not hasattr(self, "_env"): self._setup(env)
+        self.metrics.job_queued(env.now, job.job_id, job.centroid_id, "NORMAL")
+        self._queue.enqueue(job, arrival_time=arrival_time, priority=Priority.NORMAL, enqueue_time=env.now)
+        proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
+        self._panic_monitors[job.job_id] = proc
+        self._try_schedule(env)
+
+    def on_job_complete(self, env, node, job):
+        p = job.profile
+        node.allocated_ram_gb = max(0.0, node.allocated_ram_gb - p.peak_ram_gb)
+        node.allocated_vcpu = max(0.0, node.allocated_vcpu - p.workhorse_declared_vcpu)
+        self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
+        if node.job_count == 0:
+            node.state = NodeStateEnum.IDLE; node.idle_since = env.now
+            self.metrics.node_idle(env.now, node.node_id)
+            env.process(self._idle_timer(env, node))
+        self._try_schedule(env)
+
+    def guarantee_capacity(self, env, job):
+        p = job.profile
+        for node in self._nodes.values():
+            if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
+                    and node.node_id not in self._reserved
+                    and self._batch_fits(node, p.peak_ram_gb, p.workhorse_declared_vcpu)):
+                self._reserved[node.node_id] = job.job_id; return
+        instance = self.registry.cheapest_fitting(p.peak_ram_gb, p.workhorse_declared_vcpu)
+        if instance: env.process(self._launch_node(env, instance, for_job=job))
+
+    def _try_schedule(self, env):
+        while self._queue:
+            entry = self._queue.peek()
+            if self._place_job(env, entry): self._queue.pop()
+            else: break
+
+    def _place_job(self, env, entry):
+        job = entry.job; p = job.profile
+        best = self._best_fit_node(p.peak_ram_gb, p.workhorse_declared_vcpu, job.job_id)
+        if best is None: return False
+        mon = self._panic_monitors.pop(job.job_id, None)
+        if mon and mon.is_alive: mon.interrupt("placed")
+        self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
+        best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += p.workhorse_declared_vcpu
+        if best.state == NodeStateEnum.IDLE: best.state = NodeStateEnum.READY
+        env.process(run_job_process(env=env, job=job, node=best, metrics=self.metrics,
+            overload_handler=self._overload_handler, arrival_time=entry.arrival_time,
+            queue_entry_time=entry.enqueue_time, scheduler=self))
+        return True
+
+    def _batch_fits(self, node, ram_gb, vcpu):
+        return (node.allocated_ram_gb + ram_gb <= node.physical_ram_gb
+                and node.allocated_vcpu + vcpu <= node.physical_vcpu)
+
+    def _best_fit_node(self, ram_gb, vcpu, job_id):
+        candidates = [(node.allocated_ram_gb + node.allocated_vcpu, node)
+            for node in self._nodes.values()
+            if node.state == NodeStateEnum.READY
+            and self._reserved.get(node.node_id, job_id) == job_id
+            and self._batch_fits(node, ram_gb, vcpu)]
+        if not candidates: return None
+        return max(candidates, key=lambda x: x[0])[1]
+
+    def _launch_node(self, env, instance, for_job=None):
+        node_id = str(uuid.uuid4())[:8]
+        self.metrics.node_launching(env.now, node_id, instance.name)
+        node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
+                         os_overhead_gb=self.os_overhead_gb)
+        self._nodes[node_id] = node
+        self._accruers[node_id] = NodeCostAccruer(node_id=node_id, instance=instance, launch_time=env.now)
+        yield env.timeout(self.cfg.warmup_delay_seconds)
+        node.state = NodeStateEnum.READY
+        self.metrics.node_ready(env.now, node_id, instance.name)
+        if for_job: self._reserved[node_id] = for_job.job_id
+        self._try_schedule(env)
+
+    def _panic_monitor(self, env, job, enqueue_time):
+        try: yield env.timeout(self.cfg.panic_threshold_seconds)
+        except simpy.Interrupt: return
+        self.metrics.panic_trigger(env.now, job.job_id, env.now - enqueue_time)
+        self._queue.elevate_to_urgent(job.job_id)
+        self.guarantee_capacity(env, job)
+
+    def _idle_timer(self, env, node):
+        idle_start = env.now
+        yield env.timeout(self.cfg.idle_timeout_seconds)
+        if node.state == NodeStateEnum.IDLE and node.job_count == 0:
+            node.state = NodeStateEnum.TERMINATED
+            self.metrics.node_terminated(env.now, node.node_id, env.now - idle_start)
+            accruer = self._accruers.get(node.node_id)
+            if accruer: accruer.terminate(env.now)
+
+    @property
+    def accruers(self): return list(self._accruers.values())
+
+    def finalize(self, env):
+        for accruer in self._accruers.values():
+            if not accruer.is_terminated: accruer.terminate(env.now)

@@ -1,0 +1,9 @@
+scheduler_type: batch
+panic_threshold_seconds: 300
+sla_target_seconds: 600
+warmup_delay_seconds: 90
+idle_timeout_seconds: 300
+idle_check_interval_seconds: 30
+max_retries: 3
+replay_delay_seconds: 10
+k8s_os_overhead_gb: 2.0
