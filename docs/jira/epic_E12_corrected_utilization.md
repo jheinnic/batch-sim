@@ -70,11 +70,25 @@ per_node_max_burst_contribution(node, jobs):
 | U₂/R | Util₂ / Reserved | Best-case burst loading the reservation can support |
 | U₃/R | Util₃ / Reserved | Steady-state floor load on the reservation (between bursts) |
 
-**Decomposition signal:**
-> `(Util₁ - Util₃) / Allocated` — the burst gap ratio.
-> When large and persistent (time-weighted mean > ~10%), workload is a candidate
-> for Phase 2 container decomposition.
-> When small or brief, decomposition adds complexity without efficiency gain.
+**Decomposition signal — two-part diagnostic:**
+
+Primary: `(Util₁ - Util₃) / Allocated` — burst activity ratio.
+  Large = bursts are actively exercising the headroom region.
+  Small = workload is mostly steady-state; headroom is defensive but idle.
+
+Secondary: `(Util₂ - Util₁) / Allocated` — headroom slack ratio.
+  Small = headroom is nearly exhausted by concurrent bursts (contention).
+  Large = headroom is comfortable; concurrent bursts are not competing.
+
+Decision table:
+  Large primary + Small secondary → Strong YES: decompose Phase 2.
+    Bursts are active AND competing for headroom.
+    Decomposition separates burst from workhorse, relieving contention.
+  Large primary + Large secondary → Moderate: decomposition reduces cost.
+    Bursts active but not competing; K8S+ working well as-is.
+  Small primary + Large secondary → Low priority: K8S+ packing is the win.
+    Decompose for cost only, not for correctness.
+  Small primary + Small secondary → Investigate: possible misconfigured headroom.
 
 **Acceptance Criteria:**
 - All five quantities computable from the simulation event log
@@ -130,10 +144,14 @@ Replace the charts produced under BSIM-47 with correctly-defined charts.
 - Annotated with R/A and the burst gap ratio
 - Clear legend distinguishing instantaneous, max theoretical, min theoretical
 
-**Chart C — Burst gap ratio over time:**
-- `(Util₁ - Util₃) / Allocated` for both schedulers
-- Reference line at 10% (proposed decomposition-consideration threshold)
-- Annotated with "above this line: candidate for Phase 2 decomposition"
+**Chart C — Two-part decomposition diagnostic:**
+- Primary series: `(Util₁ - Util₃) / Allocated` — burst activity ratio
+- Secondary series: `(Util₂ - Util₁) / Allocated` — headroom slack ratio
+- Both schedulers overlaid; both series on same axes (different line styles)
+- Annotated with decision table:
+    Large primary + Small secondary → Strong YES: decompose Phase 2
+    Large primary + Large secondary → Moderate: decomposition reduces cost
+    Small primary                   → K8S+ packing is sufficient
 
 **Chart D — Node count over time (context panel):**
 - Same as existing node_count_over_time.png, retained for context
@@ -199,10 +217,17 @@ a scheduling strategy:
   → Determines whether two-queue routing helps or hurts
   → Required before committing to a node pool architecture
 
-**Measurement 3:** `(Util₁ - Util₃) / Allocated` time-weighted mean
-  → The burst gap ratio — decomposition signal
-  → If persistently > ~10%, Phase 2 container decomposition is worth evaluating
-  → If low, single-container K8S+ with burst pool is the right answer
+**Measurement 3a:** `(Util₁ - Util₃) / Allocated` — burst activity ratio
+  → How actively are jobs exercising the burst headroom region?
+  → Large = bursts are frequent and substantial
+
+**Measurement 3b:** `(Util₂ - Util₁) / Allocated` — headroom slack ratio
+  → How much burst headroom remains unused after current bursts?
+  → Small = contention; multiple jobs competing for Phase 2 concurrency
+  → Large = headroom comfortable; no contention
+
+  Combined: large 3a + small 3b → Phase 2 decomposition warranted
+  Combined: small 3a            → K8S+ packing is the correct lever
 
 **Framing:**
 These three measurements are not simulation outputs — they are measurements
