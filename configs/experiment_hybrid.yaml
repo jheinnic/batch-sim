@@ -1,0 +1,50 @@
+# experiment_hybrid.yaml
+#
+# Configuration for the hybrid OKD-Q1 / Batch-Q2 routing experiment.
+#
+# Architecture:
+#   Q1 jobs (advantage_ratio >= k) → OKD K8S+ scheduler (fixed MachineSet instance)
+#   Q2 jobs (advantage_ratio <  k) → AWS Batch scheduler (existing infrastructure)
+#   Unschedulable (peak > Q1 instance RAM) → AWS Batch unconditionally
+#
+# The advantage ratio is computed against the Q1 MachineSet instance type,
+# NOT the cheapest fitting instance per job. C is fixed at design time.
+#
+# Sweep axes:
+#   q1_instance_type: the fixed OKD MachineSet instance (design-time decision)
+#   k_values: advantage ratio threshold (routing sensitivity)
+#
+# For each (q1_instance_type, k) pair the experiment reports:
+#   - OKD cost, Batch cost, combined cost
+#   - % jobs routed to OKD, % routed to Batch
+#   - OKD: jobs completed, crashes, mean wait
+#   - Batch: jobs completed, mean wait
+#   - advantage_ratio distribution across job population
+
+event_list_path: workloads/reference_4h_v2.json    # v2 workload (spike-heavy mix)
+instance_registry_path: configs/instance_registry.yaml
+output_dir: results/hybrid_sweep
+
+# Q1 MachineSet instance types to sweep (design-time node pool choice)
+# Each defines C in the advantage ratio formula for all jobs
+q1_instance_types:
+  - r7i.4xlarge    #  128 GB — baseline; many large-spike jobs exceed this
+  - r7i.8xlarge    #  256 GB — comfortable for most centroid_b/c jobs
+  - r7i.16xlarge   #  512 GB — covers even centroid_f nominal peak
+
+# Advantage ratio thresholds to sweep
+k_values: [2, 3, 4]
+
+# Base scheduler config (shared tunables; scheduler_type overridden per run)
+base_scheduler:
+  scheduler_type: batch           # overridden per run; here as schema placeholder
+  panic_threshold_seconds: 300
+  sla_target_seconds: 600
+  warmup_delay_seconds: 90
+  idle_timeout_seconds: 300
+  idle_check_interval_seconds: 30
+  max_retries: 3
+  replay_delay_seconds: 10
+  k8s_os_overhead_gb: 2.0
+
+random_seed: 42
