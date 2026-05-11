@@ -22,6 +22,7 @@ class RunningJobSlot:
     current_phase: PhaseID
     phase_peak_ram_gb: float
     effective_vcpu: float
+    soft_limit_ram_gb: float = 0.0   # BSIM-61: steady-state cap for Util3
 
 
 class NodeModel:
@@ -37,6 +38,8 @@ class NodeModel:
         self.idle_since: float = -1.0
         self.allocated_ram_gb: float = 0.0
         self.allocated_vcpu: float = 0.0
+        # BSIM-61: spike headroom fixed at node launch (0.92 × tier_local_MM)
+        self.spike_headroom_gb_at_launch: float = 0.0
 
     @property
     def job_count(self): return len(self._slots)
@@ -44,9 +47,10 @@ class NodeModel:
     def instantaneous_vcpu(self): return sum(s.effective_vcpu for s in self._slots.values())
     def is_overloaded(self): return self.instantaneous_ram_gb() > self.physical_ram_gb
 
-    def add_job(self, job, phase, ram_gb, vcpu):
+    def add_job(self, job, phase, ram_gb, vcpu, soft_limit_gb=0.0):
         self._slots[job.job_id] = RunningJobSlot(job=job, current_phase=phase,
-                                                   phase_peak_ram_gb=ram_gb, effective_vcpu=vcpu)
+                                                   phase_peak_ram_gb=ram_gb, effective_vcpu=vcpu,
+                                                   soft_limit_ram_gb=soft_limit_gb)
     def update_phase(self, job_id, phase, ram_gb, vcpu):
         if job_id in self._slots:
             s = self._slots[job_id]; s.current_phase = phase
@@ -122,7 +126,8 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
     metrics.job_start(env.now, job_id, job.centroid_id, node.node_id)
 
     metrics.phase_transition(env.now, job_id, PhaseID.DOWNLOAD, node.node_id)
-    node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0)
+    node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0,
+                 soft_limit_gb=p.soft_limit_ram_gb)
     yield env.timeout(p.download_duration_s)
 
     metrics.phase_transition(env.now, job_id, PhaseID.PREPROCESS, node.node_id)
