@@ -53,10 +53,20 @@ class BatchScheduler:
         if instance: env.process(self._launch_node(env, instance, for_job=job))
 
     def _try_schedule(self, env):
-        while self._queue:
-            entry = self._queue.peek()
-            if self._place_job(env, entry): self._queue.pop()
-            else: break
+        """Scan full queue for placeable jobs; do not stop at first unplaceable
+        entry (avoids deadlock when a warming node is reserved for a later job
+        while an already-ready node could serve an earlier-queued job)."""
+        import heapq
+        changed = True
+        while changed and self._queue:
+            changed = False
+            for entry in sorted(self._queue._heap):
+                if self._place_job(env, entry):
+                    self._queue._heap = [e for e in self._queue._heap
+                                         if e.job.job_id != entry.job.job_id]
+                    heapq.heapify(self._queue._heap)
+                    changed = True
+                    break
 
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile
