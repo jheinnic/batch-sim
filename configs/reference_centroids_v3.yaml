@@ -1,0 +1,97 @@
+# reference_centroids_v3.yaml — BSIM-57: Degenerate workload with extreme spikers
+#
+# Adds centroid_f (Extreme Spiker) to the v2 mix.
+# centroid_f is sized so that:
+#   - Nominal peak (~90 GB) sits in borderline Q1/Q2 territory at k=3-4
+#   - 2x Pareto draw (~280 GB) needs r7i.16xlarge; good Q1 ratio there
+#   - Heavy-tail draws (>3x) approach or exceed even r7i.16xlarge (512 GB)
+#     demonstrating the degenerate condition at the workload's Pareto boundary
+#
+# This workload is used in two experimental conditions (BSIM-57):
+#   1. Combined pool: all centroids in a single K8S+ two-queue scheduler
+#   2. Isolated pool: centroid_f jobs routed to a dedicated r7i.16xlarge pool
+
+horizon_seconds: 14400
+random_seed: 42
+network_bandwidth_mbps: 500
+
+centroids:
+
+  - id: centroid_a
+    label: "Small / Short"
+    description: "Lightweight quick-turnaround jobs."
+    arrival_rate_per_hour: 15
+    pareto_alpha: 2.5
+    download_gb: 5.0
+    preprocess_memory_exponent_a: 1.2
+    preprocess_memory_exponent_b: 1.4
+    preprocess_duration_seconds: 30
+    workhorse_cpu_stages: [120, 20, 180, 15]
+    workhorse_thread_counts: [4, 4]
+    io_wait_fraction: 0.30
+    upload_gb: 0.5
+
+  - id: centroid_b
+    label: "Memory-Heavy"
+    description: "High peak memory, moderate workhorse."
+    arrival_rate_per_hour: 25
+    pareto_alpha: 2.0
+    download_gb: 40.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.6
+    preprocess_duration_seconds: 55
+    workhorse_cpu_stages: [300, 30, 600, 25, 300, 20]
+    workhorse_thread_counts: [8, 8, 8]
+    io_wait_fraction: 0.25
+    upload_gb: 4.0
+
+  - id: centroid_c
+    label: "Compute-Heavy"
+    description: "Long multi-stage CPU-bound jobs with meaningful preprocess spike."
+    arrival_rate_per_hour: 20
+    pareto_alpha: 2.2
+    download_gb: 12.0
+    preprocess_memory_exponent_a: 1.1
+    preprocess_memory_exponent_b: 1.3
+    preprocess_duration_seconds: 40
+    workhorse_cpu_stages: [600, 45, 1200, 30, 900, 40, 600, 25]
+    workhorse_thread_counts: [16, 16, 16, 16]
+    io_wait_fraction: 0.20
+    upload_gb: 1.2
+
+  - id: centroid_e
+    label: "Burst-Dominant"
+    description: "Jobs where the RAM spike dominates execution time."
+    arrival_rate_per_hour: 10
+    pareto_alpha: 2.3
+    download_gb: 25.0
+    preprocess_memory_exponent_a: 1.8
+    preprocess_memory_exponent_b: 1.7
+    preprocess_duration_seconds: 90
+    workhorse_cpu_stages: [60, 15, 60, 10]
+    workhorse_thread_counts: [4, 4]
+    io_wait_fraction: 0.35
+    upload_gb: 1.0
+
+  - id: centroid_f
+    label: "Extreme Spiker"
+    description: >
+      Jobs whose peak RAM is borderline at k=3-4 on mid-tier instances
+      but recovers to Queue 1 territory on r7i.16xlarge (512 GB).
+      Heavy Pareto tail (alpha=1.8) ensures some jobs approach or exceed
+      even the largest available instance, demonstrating the degenerate
+      condition where no K8S strategy helps.
+
+      Nominal: download=10 GB → peak = 1.8 * 10^1.7 ≈ 90 GB (r7i.4xlarge, borderline)
+      2x draw: download=20 GB → peak = 1.8 * 20^1.7 ≈ 280 GB (r7i.16xlarge, Q1 at k=4)
+      3x draw: download=30 GB → peak = 1.8 * 30^1.7 ≈ 540 GB (exceeds all instances)
+    arrival_rate_per_hour: 8
+    pareto_alpha: 1.8
+    download_gb: 10.0
+    preprocess_memory_exponent_a: 1.8
+    preprocess_memory_exponent_b: 1.7
+    preprocess_duration_seconds: 100
+    workhorse_cpu_stages: [200, 30, 400, 25]
+    workhorse_thread_counts: [8, 8]
+    io_wait_fraction: 0.25
+    upload_gb: 3.0
