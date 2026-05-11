@@ -283,6 +283,12 @@ with open('results/utilization_charts/util_metrics.json','w') as f:
 print("  Saved: results/utilization_charts/util_metrics.json")
 PYEOF
 
+echo "  Generating utilization charts..."
+python scripts/generate_utilization_charts.py \
+  --input  results/utilization_charts/util_metrics.json \
+  --output results/utilization_charts
+echo "  Charts written to results/utilization_charts/"
+
 echo ""
 echo "==================================================================="
 echo "  All runs complete."
