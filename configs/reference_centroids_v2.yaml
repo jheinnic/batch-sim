@@ -1,0 +1,89 @@
+# reference_centroids_v2.yaml — BSIM-51: Rebalanced workload
+#
+# Changes from v1:
+#   - centroid_a (Small/Short): 24/hr → 15/hr  (over-represented small jobs reduced)
+#   - centroid_b (Memory-Heavy): 15/hr → 25/hr  (core use-case amplified)
+#   - centroid_c (Compute-Heavy): 15/hr → 20/hr  (spike-bearing jobs amplified)
+#   - centroid_d (Balanced): 6/hr → 2/hr  (reduced — least representative of spike concern)
+#   - centroid_e (Burst-Dominant): NEW 10/hr  (spike IS the job)
+#
+# Net mix: A=21%, B=35%, C=28%, D=3%, E=14% — ~71/hr total
+
+horizon_seconds: 14400
+random_seed: 42
+network_bandwidth_mbps: 500
+
+centroids:
+
+  - id: centroid_a
+    label: "Small / Short"
+    description: "Lightweight quick-turnaround jobs. Reduced in v2 to better represent the spike-centric population."
+    arrival_rate_per_hour: 15
+    pareto_alpha: 2.5
+    download_gb: 5.0
+    preprocess_memory_exponent_a: 1.2
+    preprocess_memory_exponent_b: 1.4
+    preprocess_duration_seconds: 30
+    workhorse_cpu_stages: [120, 20, 180, 15]
+    workhorse_thread_counts: [4, 4]
+    io_wait_fraction: 0.30
+    upload_gb: 0.5
+
+  - id: centroid_b
+    label: "Memory-Heavy"
+    description: "High peak memory, moderate workhorse. Amplified in v2 — core case for K8S+ analysis."
+    arrival_rate_per_hour: 25
+    pareto_alpha: 2.0
+    download_gb: 40.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.6
+    preprocess_duration_seconds: 55
+    workhorse_cpu_stages: [300, 30, 600, 25, 300, 20]
+    workhorse_thread_counts: [8, 8, 8]
+    io_wait_fraction: 0.25
+    upload_gb: 4.0
+
+  - id: centroid_c
+    label: "Compute-Heavy"
+    description: "Long multi-stage CPU-bound jobs. All have a meaningful preprocess spike."
+    arrival_rate_per_hour: 20
+    pareto_alpha: 2.2
+    download_gb: 12.0
+    preprocess_memory_exponent_a: 1.1
+    preprocess_memory_exponent_b: 1.3
+    preprocess_duration_seconds: 40
+    workhorse_cpu_stages: [600, 45, 1200, 30, 900, 40, 600, 25]
+    workhorse_thread_counts: [16, 16, 16, 16]
+    io_wait_fraction: 0.20
+    upload_gb: 1.2
+
+  - id: centroid_d
+    label: "Balanced"
+    description: "Moderate all-around. Reduced in v2 — least relevant to spike-collision analysis."
+    arrival_rate_per_hour: 2
+    pareto_alpha: 2.8
+    download_gb: 20.0
+    preprocess_memory_exponent_a: 1.3
+    preprocess_memory_exponent_b: 1.5
+    preprocess_duration_seconds: 45
+    workhorse_cpu_stages: [400, 35, 800, 30, 400, 25]
+    workhorse_thread_counts: [8, 8, 8]
+    io_wait_fraction: 0.28
+    upload_gb: 2.0
+
+  - id: centroid_e
+    label: "Burst-Dominant"
+    description: >
+      NEW in v2. Jobs where the RAM spike IS the bulk of execution time.
+      Large download, extreme super-linear RAM spike, near-cap preprocess
+      duration, short workhorse. The semaphore wait in K8S+ is most visible here.
+    arrival_rate_per_hour: 10
+    pareto_alpha: 2.3
+    download_gb: 25.0
+    preprocess_memory_exponent_a: 1.8
+    preprocess_memory_exponent_b: 1.7
+    preprocess_duration_seconds: 90
+    workhorse_cpu_stages: [60, 15, 60, 10]
+    workhorse_thread_counts: [4, 4]
+    io_wait_fraction: 0.35
+    upload_gb: 1.0
