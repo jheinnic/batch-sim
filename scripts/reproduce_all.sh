@@ -49,6 +49,11 @@ python -m batch_sim generate \
   --seed $SEED
 echo "  v3 workload: workloads/reference_4h_v3.json"
 
+echo ""
+echo "RUN-01b: Inspecting workload size constraints..."
+python scripts/inspect_workload.py --events workloads/reference_4h_v1.json
+python scripts/inspect_workload.py --events workloads/reference_4h_v2.json
+
 # ── RUN-02: Batch vs K8S+ baselines (v2 workload) ─────────────────────
 echo ""
 echo "RUN-02: Batch vs K8S+ baselines (v2 workload)..."
@@ -290,6 +295,21 @@ python scripts/generate_utilization_charts.py \
 echo "  Charts written to results/utilization_charts/"
 
 echo ""
+# ── RUN-06: Node timeline charts ───────────────────────────────────
+echo ""
+echo "RUN-06: Generating node timeline charts (overview only for speed)..."
+python scripts/generate_node_timelines.py \
+  --scheduler batch \
+  --events workloads/reference_4h_v1.json \
+  --overview-only
+python scripts/generate_node_timelines.py \
+  --scheduler k8s \
+  --events workloads/reference_4h_v1.json \
+  --overview-only
+echo "  Overviews: results/node_timelines/{batch,k8s}/overview.png"
+echo "  Run without --overview-only to generate per-node charts (50+ files)"
+
+echo ""
 echo "==================================================================="
 echo "  All runs complete."
 echo ""
@@ -298,7 +318,8 @@ echo "    workloads/                      — event lists (v1, v2, v3)"
 echo "    results/baselines/              — RUN-02 scorecards + comparison"
 echo "    results/k_sweep_v2/             — RUN-03 two-queue k-sweep"
 echo "    results/hybrid_sweep/           — RUN-04 hybrid OKD+Batch sweep"
-echo "    results/utilization_charts/     — RUN-05 utilization metrics"
+echo "    results/utilization_charts/     — RUN-05 utilization metrics + charts"
+echo "    results/node_timelines/         — RUN-06 node lifecycle Gantt charts"
 echo ""
 echo "  Key numbers to verify:"
 echo "    Batch baseline (v2):    ~\$57    K8S+ baseline: ~\$52"
