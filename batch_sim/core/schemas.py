@@ -23,6 +23,17 @@ class CentroidConfig(BaseModel):
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
     workhorse_thread_counts: list[PositiveInt]
     io_wait_fraction: Fraction
+    burst_size_min: int = Field(
+        default=1, ge=1,
+        description="Minimum jobs per burst arrival event. "
+                     "Default 1 = existing single-job Poisson behaviour."
+    )
+    burst_size_max: int = Field(
+        default=1, ge=1,
+        description="Maximum jobs per burst arrival event (inclusive). "
+                     "arrival_rate_per_hour governs burst events per hour, "
+                     "not individual jobs. Set min=3, max=18 for real workload."
+    )
     pareto_multiplier_min: float = Field(
         default=0.25,
         gt=0.0, lt=1.0,
@@ -64,6 +75,11 @@ class CentroidConfig(BaseModel):
                     f"workhorse_io_wait_per_stage must have {expected} entries "
                     f"(one per parallel stage); got {len(self.workhorse_io_wait_per_stage)}"
                 )
+        if self.burst_size_min > self.burst_size_max:
+            raise ValueError(
+                f"burst_size_min ({self.burst_size_min}) must be "
+                f"<= burst_size_max ({self.burst_size_max})"
+            )
         return self
 
 

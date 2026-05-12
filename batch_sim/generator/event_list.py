@@ -20,15 +20,31 @@ class ArrivalRecord:
 
 
 def generate_arrivals(centroids, horizon_seconds, rng):
+    """
+    Generate arrival records for all centroids.
+
+    arrival_rate_per_hour governs BURST events per hour.
+    Each burst emits N jobs with identical arrival_time, where
+    N ~ Uniform[burst_size_min, burst_size_max].
+    When burst_size_min == burst_size_max == 1 (default), behaviour
+    is identical to the original single-job Poisson process.
+    """
     records = []
     for centroid in centroids:
         lam = centroid.arrival_rate_per_hour / 3600.0
-        t = 0.0
+        lo  = centroid.burst_size_min
+        hi  = centroid.burst_size_max
+        t   = 0.0
         while True:
             t += rng.exponential(1.0 / lam)
             if t > horizon_seconds:
                 break
-            records.append(ArrivalRecord(arrival_time=t, centroid_id=centroid.id))
+            # Draw burst size: uniform integer in [lo, hi]
+            n = int(rng.integers(lo, hi + 1)) if hi > lo else lo
+            for _ in range(n):
+                records.append(
+                    ArrivalRecord(arrival_time=t, centroid_id=centroid.id)
+                )
     records.sort(key=lambda r: r.arrival_time)
     return records
 
@@ -130,6 +146,10 @@ def build_event_list(config: SimulationConfig) -> EventList:
         "network_bandwidth_mbps": config.network_bandwidth_mbps,
         "centroid_ids": [c.id for c in config.centroids],
         "total_jobs": len(events),
+        "burst_params": {
+            c.id: {"min": c.burst_size_min, "max": c.burst_size_max}
+            for c in config.centroids
+        },
     }
     return EventList(events=events, metadata=metadata)
 

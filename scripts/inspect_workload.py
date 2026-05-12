@@ -182,6 +182,25 @@ def main():
     print(f'\n{"="*70}\n')
 
 
+    # ── Burst size distribution ──────────────────────────────────────────
+    burst_params = el.metadata.get('burst_params', {})
+    if any(v['max'] > 1 for v in burst_params.values()):
+        print('\n── Burst arrival distribution ───────────────────────────────────────')
+        print('   arrival_rate_per_hour = burst events/hr; N jobs per burst\n')
+        # Reconstruct burst sizes from arrival times
+        from collections import Counter
+        for cid in sorted(by_centroid):
+            evts   = by_centroid[cid]
+            bp     = burst_params.get(cid, {'min': 1, 'max': 1})
+            # Group by arrival_time to measure actual burst sizes
+            time_counts = Counter(round(e.arrival_time, 3) for e in evts)
+            sizes  = list(time_counts.values())
+            n_bursts = len(sizes)
+            if not sizes: continue
+            print(f'  {cid}: config=[{bp["min"]},{bp["max"]}]  '
+                  f'bursts={n_bursts}  jobs={len(evts)}  '
+                  f'N min={min(sizes)} mean={sum(sizes)/len(sizes):.1f} max={max(sizes)}')
+
     # Per-stage effective thread counts
     print('\n── Per-stage effective thread counts (parallel stages only) ─────────')
     print('   declared → effective shows I/O wait reduction per stage\n')
