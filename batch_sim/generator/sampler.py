@@ -32,7 +32,19 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
         int(np.clip(round(t * _pareto_multiplier(alpha, rng)), 1, 64))
         for t in centroid.workhorse_thread_counts
     ]
-    io_wait = float(np.clip(centroid.io_wait_fraction + rng.normal(0, 0.05), 0.05, 0.95))
+    # Per-stage I/O wait — independent perturbation per stage if specified
+    if centroid.workhorse_io_wait_per_stage is not None:
+        io_wait_fractions = [
+            float(np.clip(w + rng.normal(0, 0.05), 0.05, 0.95))
+            for w in centroid.workhorse_io_wait_per_stage
+        ]
+        # Scalar io_wait kept as fallback; use first stage value for any
+        # code that still references the scalar (e.g. display/logging)
+        io_wait = float(np.mean(io_wait_fractions))
+    else:
+        io_wait = float(np.clip(centroid.io_wait_fraction + rng.normal(0, 0.05), 0.05, 0.95))
+        io_wait_fractions = None
+
     upload_gb = max(centroid.upload_gb * _pareto_multiplier(alpha, rng), 0.01)
 
     profile = build_phase_profile(
@@ -42,5 +54,6 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
         workhorse_thread_counts=perturbed_threads,
         io_wait_fraction=io_wait, upload_gb=upload_gb,
         network_bandwidth_mbps=network_bandwidth_mbps,
+        io_wait_fractions=io_wait_fractions,
     )
     return JobSpec(centroid_id=centroid.id, profile=profile)

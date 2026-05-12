@@ -60,7 +60,15 @@ def build_phase_profile(
     *, download_gb, preprocess_a, preprocess_b, preprocess_duration_s,
     workhorse_cpu_stages, workhorse_thread_counts, io_wait_fraction,
     upload_gb, network_bandwidth_mbps,
+    io_wait_fractions: list[float] | None = None,
 ) -> PhaseProfile:
+    """
+    io_wait_fractions: optional list with one value per parallel stage.
+    If provided, overrides the scalar io_wait_fraction for each parallel stage
+    independently, allowing CPU-bound and I/O-bound stages to be modelled
+    with different effective thread counts.
+    Falls back to scalar io_wait_fraction if absent (backward-compatible).
+    """
     bandwidth_gbs = network_bandwidth_mbps / 1000.0
     download_duration_s = download_gb / bandwidth_gbs
     peak_ram_gb = preprocess_a * (download_gb ** preprocess_b)
@@ -75,7 +83,13 @@ def build_phase_profile(
     for i, cpu_seconds in enumerate(workhorse_cpu_stages):
         if i % 2 == 0:
             declared = workhorse_thread_counts[parallel_idx]
-            effective = declared * (1.0 - io_wait_fraction)
+            # Use per-stage wait if provided, else fall back to scalar
+            stage_wait = (
+                io_wait_fractions[parallel_idx]
+                if io_wait_fractions is not None
+                else io_wait_fraction
+            )
+            effective = declared * (1.0 - stage_wait)
             parallel_idx += 1
         else:
             declared = 1

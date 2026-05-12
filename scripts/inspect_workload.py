@@ -182,5 +182,20 @@ def main():
     print(f'\n{"="*70}\n')
 
 
+    # Per-stage effective thread counts
+    print('\n── Per-stage effective thread counts (parallel stages only) ─────────')
+    print('   declared → effective shows I/O wait reduction per stage\n')
+    for cid in sorted(by_centroid):
+        evts = by_centroid[cid][:3]
+        print(f'  {cid}:')
+        for e_idx, ev in enumerate(evts):
+            stages   = ev.workhorse_stages
+            parallel = [(s['index'], s['declared_threads'], s['effective_threads'])
+                        for s in stages if s['index'] % 2 == 0]
+            parts = [f"stage{idx}: {decl}→{eff:.1f}" for idx,decl,eff in parallel]
+            print(f'    job {e_idx+1}: {", ".join(parts)}')
+        if len(by_centroid[cid]) > 3:
+            print(f'    ... ({len(by_centroid[cid])-3} more jobs)')
+
 if __name__ == '__main__':
     main()

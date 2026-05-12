@@ -1,0 +1,44 @@
+# example_per_stage_io_wait.yaml
+#
+# Demonstrates the workhorse_io_wait_per_stage feature (BSIM-66).
+#
+# This centroid models a job with a clear I/O-bound → CPU-bound → I/O-bound
+# profile across its three parallel workhorse stages:
+#
+#   Stage 0 (parallel): reading compressed input chunks from local disk
+#            → high I/O wait (0.70) → effective threads ≈ 30% of declared
+#
+#   Stage 2 (parallel): numerical computation on in-memory data
+#            → low I/O wait (0.08) → effective threads ≈ 92% of declared
+#
+#   Stage 4 (parallel): writing result chunks and computing checksums
+#            → moderate I/O wait (0.45) → effective threads ≈ 55% of declared
+#
+# The scalar io_wait_fraction (0.40) remains required as a fallback
+# and is used for any display/logging code that reads a single value.
+# The per-stage array takes precedence during sampling.
+
+horizon_seconds: 14400
+random_seed: 42
+network_bandwidth_mbps: 500
+
+centroids:
+  - id: io_profile_demo
+    label: "I/O profile demo"
+    description: >
+      Three-stage parallel workhorse with explicitly different I/O wait
+      per stage: heavy read I/O → CPU compute → moderate write I/O.
+    arrival_rate_per_hour: 10
+    pareto_alpha: 2.2
+    download_gb: 15.0
+    preprocess_memory_exponent_a: 1.3
+    preprocess_memory_exponent_b: 1.5
+    preprocess_duration_seconds: 45
+    workhorse_cpu_stages: [300, 20, 800, 15, 200, 10]
+    workhorse_thread_counts: [8, 8, 8]
+    io_wait_fraction: 0.40            # scalar fallback (required)
+    workhorse_io_wait_per_stage:      # per-stage override (optional)
+      - 0.70    # stage 0: reading compressed input  → 30% CPU efficiency
+      - 0.08    # stage 2: numerical computation      → 92% CPU efficiency
+      - 0.45    # stage 4: writing results + checksum → 55% CPU efficiency
+    upload_gb: 1.5

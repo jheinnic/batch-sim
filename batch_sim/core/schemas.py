@@ -23,11 +23,19 @@ class CentroidConfig(BaseModel):
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
     workhorse_thread_counts: list[PositiveInt]
     io_wait_fraction: Fraction
+    workhorse_io_wait_per_stage: list[Fraction] | None = Field(
+        default=None,
+        description=(
+            "Optional per-parallel-stage I/O wait fractions. "
+            "Length must equal len(workhorse_cpu_stages) // 2. "
+            "If absent, io_wait_fraction is applied uniformly to all parallel stages."
+        )
+    )
     upload_gb: PositiveFloat
 
     @model_validator(mode="after")
     def _validate_stage_arrays(self) -> "CentroidConfig":
-        stages = self.workhorse_cpu_stages
+        stages  = self.workhorse_cpu_stages
         threads = self.workhorse_thread_counts
         if len(stages) % 2 != 0:
             raise ValueError(f"workhorse_cpu_stages must have even length; got {len(stages)}")
@@ -36,6 +44,12 @@ class CentroidConfig(BaseModel):
             raise ValueError(
                 f"workhorse_thread_counts must have {expected} entries; got {len(threads)}"
             )
+        if self.workhorse_io_wait_per_stage is not None:
+            if len(self.workhorse_io_wait_per_stage) != expected:
+                raise ValueError(
+                    f"workhorse_io_wait_per_stage must have {expected} entries "
+                    f"(one per parallel stage); got {len(self.workhorse_io_wait_per_stage)}"
+                )
         return self
 
 
