@@ -45,10 +45,12 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
         max(s * pm(), 1.0)
         for s in centroid.workhorse_cpu_stages
     ]
-    perturbed_threads = [
-        int(np.clip(round(t * pm()), 1, 64))
-        for t in centroid.workhorse_thread_counts
-    ]
+    # Thread counts are hardware parallelism declarations, not workload
+    # size variables. They are NOT Pareto-perturbed. Scaling them with
+    # the same multiplier as download_gb causes declared_vcpu to balloon
+    # (e.g. 16 threads * 3x multiplier = 48 vcpu), leaving room for only
+    # one job per node regardless of available RAM.
+    perturbed_threads = list(centroid.workhorse_thread_counts)
     # Per-stage I/O wait — independent perturbation per stage if specified
     if centroid.workhorse_io_wait_per_stage is not None:
         io_wait_fractions = [
