@@ -23,6 +23,20 @@ class CentroidConfig(BaseModel):
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
     workhorse_thread_counts: list[PositiveInt]
     io_wait_fraction: Fraction
+    pareto_multiplier_min: float = Field(
+        default=0.25,
+        gt=0.0, lt=1.0,
+        description="Lower clamp on the Pareto multiplier applied to all "
+                     "sampled parameters. Default 0.25 (quarter of nominal)."
+    )
+    pareto_multiplier_max: float = Field(
+        default=4.0,
+        gt=1.0,
+        description="Upper clamp on the Pareto multiplier applied to all "
+                     "sampled parameters. Default 4.0 (four times nominal). "
+                     "Reduce to suppress heavy-tail outliers; increase to "
+                     "allow larger spikes in stress-test workloads."
+    )
     workhorse_io_wait_per_stage: list[Fraction] | None = Field(
         default=None,
         description=(

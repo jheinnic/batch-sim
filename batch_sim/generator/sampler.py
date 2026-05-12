@@ -6,30 +6,47 @@ from batch_sim.core.schemas import CentroidConfig
 from batch_sim.generator.job_spec import JobSpec, build_phase_profile
 
 
-def _pareto_multiplier(alpha: float, rng: Generator) -> float:
+def _pareto_multiplier(
+    alpha: float,
+    rng: Generator,
+    min_mult: float = 0.25,
+    max_mult: float = 4.0,
+) -> float:
+    """
+    Draw a mean-normalised Pareto multiplier clamped to [min_mult, max_mult].
+    min_mult and max_mult come from CentroidConfig.pareto_multiplier_{min,max}
+    so each centroid can control its own tail behaviour independently.
+    """
     if alpha > 1.0:
         draw = rng.pareto(alpha) + 1.0
         mean = alpha / (alpha - 1.0)
         multiplier = draw / mean
     else:
         multiplier = rng.uniform(0.8, 1.2)
-    return float(np.clip(multiplier, 0.25, 4.0))
+    return float(np.clip(multiplier, min_mult, max_mult))
 
 
 def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps: float) -> JobSpec:
-    alpha = centroid.pareto_alpha
-    download_gb = max(centroid.download_gb * _pareto_multiplier(alpha, rng), 0.1)
-    a = centroid.preprocess_memory_exponent_a * _pareto_multiplier(alpha, rng)
+    alpha   = centroid.pareto_alpha
+    lo      = centroid.pareto_multiplier_min
+    hi      = centroid.pareto_multiplier_max
+
+    def pm() -> float:
+        """Shorthand: draw one multiplier using this centroid's clamp bounds."""
+        return _pareto_multiplier(alpha, rng, min_mult=lo, max_mult=hi)
+
+    download_gb = max(centroid.download_gb * pm(), 0.1)
+    a = centroid.preprocess_memory_exponent_a * pm()
     b = centroid.preprocess_memory_exponent_b
     preprocess_duration_s = min(
-        centroid.preprocess_duration_seconds * _pareto_multiplier(alpha, rng), 120.0
+        centroid.preprocess_duration_seconds * pm(), 120.0
     )
     perturbed_stages = [
-        max(s * _pareto_multiplier(alpha, rng), 1.0)
+        max(s * pm(), 1.0)
         for s in centroid.workhorse_cpu_stages
     ]
     perturbed_threads = [
-        int(np.clip(round(t * _pareto_multiplier(alpha, rng)), 1, 64))
+        int(np.clip(round(t * pm()), 1, 64))
         for t in centroid.workhorse_thread_counts
     ]
     # Per-stage I/O wait — independent perturbation per stage if specified
