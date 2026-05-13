@@ -1,0 +1,8 @@
+instance_types:
+  - {name: m7i.4xlarge,  family: general, ram_gb:  64, vcpu: 16, hourly_price_usd: 0.8064}
+  - {name: c7i.8xlarge,  family: compute, ram_gb:  64, vcpu: 32, hourly_price_usd: 1.4280}
+  - {name: r7i.4xlarge,  family: memory,  ram_gb: 128, vcpu: 16, hourly_price_usd: 1.0080}
+  - {name: c7i.16xlarge, family: compute, ram_gb: 128, vcpu: 64, hourly_price_usd: 2.8560}
+  - {name: r7i.8xlarge,  family: memory,  ram_gb: 256, vcpu: 32, hourly_price_usd: 2.0160}
+  - {name: m7i.16xlarge, family: general, ram_gb: 256, vcpu: 64, hourly_price_usd: 3.2256}
+  - {name: r7i.16xlarge, family: memory,  ram_gb: 512, vcpu: 64, hourly_price_usd: 4.0320}

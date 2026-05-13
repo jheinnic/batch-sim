@@ -1,9 +1,9 @@
 scheduler_type: k8s
 panic_threshold_seconds: 1800
-sla_target_seconds: 900
+sla_target_seconds: 1800
 warmup_delay_seconds: 30
-idle_timeout_seconds: 500
+idle_timeout_seconds: 120
 idle_check_interval_seconds: 30
 max_retries: 3
-replay_delay_seconds: 10
+replay_delay_seconds: 20
 k8s_os_overhead_gb: 2.0
