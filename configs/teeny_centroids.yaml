@@ -1,0 +1,57 @@
+# reference_centroids_24h.yaml — BSIM-49: 24-hour simulation with diurnal arrival pattern
+#
+# Arrival rates are base rates (hours 9-17 peak).
+# The experiment runner applies the multiplier_by_hour scaling below.
+# multiplier_by_hour: 24 values, one per hour starting at midnight (hour 0).
+# Trough = 0.1 (overnight), ramp up morning, peak 1.0 business hours, ramp down evening.
+
+horizon_seconds: 4500
+random_seed: 99288
+cooloff_seconds: 7200  # 2-hour tail after horizon; no new arrivals, running jobs finish
+network_bandwidth_mbps: 10000  # 10 Gbps — conservative sustained estimate for m7i/r7i/c7i instances
+
+arrival_multiplier_by_hour: [
+  1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
+  1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
+  1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00
+]
+
+centroids:
+  - id: min01
+    label: "Compute-Heavy"
+    description: "Long multi-stage CPU-bound jobs."
+    arrival_rate_per_hour: 2.0
+    burst_size_min: 3
+    burst_size_max: 3
+    pareto_alpha: 1.2
+    pareto_multiplier_min: 1.0
+    pareto_multiplier_max: 1.5
+    download_gb: 24.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.0
+    preprocess_duration_seconds: 95
+    workhorse_cpu_stages: [2000, 1000, 2000, 10]
+    workhorse_soft_vcpu: [4, 4]
+    workhorse_hard_vcpu: [4, 4]
+    workhorse_io_wait_per_stage: [0.1, 0.1]
+    io_wait_fraction: 0
+    upload_gb: 0.2
+  - id: min02
+    label: "Compute-Heavy"
+    description: "Long multi-stage CPU-bound jobs."
+    arrival_rate_per_hour: 2.0
+    burst_size_min: 3
+    burst_size_max: 3
+    pareto_alpha: 1.2
+    pareto_multiplier_min: 1.0
+    pareto_multiplier_max: 1.5
+    download_gb: 24.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.0
+    preprocess_duration_seconds: 95
+    workhorse_cpu_stages: [2000, 10]
+    workhorse_soft_vcpu: [1]
+    workhorse_hard_vcpu: [16]
+    workhorse_io_wait_per_stage: [0.1]
+    io_wait_fraction: 0
+    upload_gb: 0.2

@@ -36,7 +36,7 @@ def generate_arrivals(centroids, horizon_seconds, rng):
         hi  = centroid.burst_size_max
         t   = 0.0
         while True:
-            t += rng.exponential(1.0 / lam)
+            t += np.average(rng.exponential(1.0 / lam, 5000))
             if t > horizon_seconds:
                 break
             # Draw burst size: uniform integer in [lo, hi]

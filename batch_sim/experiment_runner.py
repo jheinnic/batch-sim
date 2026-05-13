@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Optional
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.console import Console
-from batch_sim.core.schemas import SchedulerConfig, SchedulerType
+from batch_sim.core.schemas import SchedulerType
 from batch_sim.core.engine import SimulationEngine
-from batch_sim.generator.event_list import EventList, load_event_list
+from batch_sim.generator.event_list import load_event_list
 from batch_sim.metrics.collector import MetricsCollector
 from batch_sim.metrics.aggregator import build_scorecard
-from batch_sim.registry.instance_registry import InstanceRegistry
 
 console = Console()
 

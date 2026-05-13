@@ -54,13 +54,13 @@ class CentroidConfig(BaseModel):
     )
     pareto_multiplier_min: float = Field(
         default=0.25,
-        gt=0.0, lt=1.0,
+        gt=0.0, le=1.0,
         description="Lower clamp on the Pareto multiplier applied to all "
                      "sampled parameters. Default 0.25 (quarter of nominal)."
     )
     pareto_multiplier_max: float = Field(
         default=4.0,
-        gt=1.0,
+        ge=1.0,
         description="Upper clamp on the Pareto multiplier applied to all "
                      "sampled parameters. Default 4.0 (four times nominal). "
                      "Reduce to suppress heavy-tail outliers; increase to "

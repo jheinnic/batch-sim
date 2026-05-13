@@ -60,8 +60,8 @@ from batch_sim.generator.event_list import load_event_list
 from batch_sim.core.schemas import SchedulerType
 from batch_sim.metrics.collector import MetricsCollector, EventType
 from batch_sim.core.engine import SimulationEngine
-from batch_sim.scheduler.batch_scheduler import BatchScheduler
-from batch_sim.scheduler.k8s_plus_scheduler import K8SPlusScheduler
+# from batch_sim.scheduler.batch_scheduler import BatchScheduler
+# from batch_sim.scheduler.k8s_plus_scheduler import K8SPlusScheduler
 
 # ---------------------------------------------------------------------------
 # Colour map
