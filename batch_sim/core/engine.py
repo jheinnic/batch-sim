@@ -81,9 +81,10 @@ class OverloadHandler:
         if victim_job.retry_count > self.cfg.max_retries:
             self.metrics.job_terminal(env.now, victim_id, victim_job.centroid_id)
         else:
-            copy = victim_job.fresh_copy()
+            copy = victim_job.fresh_copy()      # copy inherits is_cancelled=False
             copy.retry_count = victim_job.retry_count
             self.replay_queue.enqueue(copy, arrival_time=env.now + self.cfg.replay_delay_seconds)
+        victim_job.is_cancelled = True          # set after copy so replay is not pre-cancelled
         return victim_id
 
 
@@ -125,11 +126,17 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
     start_time = env.now; queue_wait_s = start_time - queue_entry_time
     metrics.job_start(env.now, job_id, job.centroid_id, node.node_id)
 
+    def _evicted():
+        """True if this job was crashed by another job's overload check while we were yielded."""
+        return job.is_cancelled
+
     metrics.phase_transition(env.now, job_id, PhaseID.DOWNLOAD, node.node_id)
     node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0,
                  soft_limit_gb=p.soft_limit_ram_gb)
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.download_duration_s)
+    if _evicted():
+        node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
 
     metrics.phase_transition(env.now, job_id, PhaseID.PREPROCESS, node.node_id)
     node.update_phase(job_id, PhaseID.PREPROCESS, ram_gb=p.preprocess_peak_ram_gb, vcpu=p.preprocess_vcpu)
@@ -138,6 +145,8 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
     if victim == job_id:
         node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
     yield env.timeout(p.preprocess_duration_s)
+    if _evicted():
+        node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
     node.update_phase(job_id, PhaseID.WORKHORSE, ram_gb=p.workhorse_ram_gb, vcpu=0.0)
 
     metrics.phase_transition(env.now, job_id, PhaseID.WORKHORSE, node.node_id)
@@ -146,11 +155,15 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
                           vcpu=stage.effective_threads)
         scheduler.cpu_boost(env, node, metrics)
         yield env.timeout(stage.wall_clock_seconds)
+        if _evicted():
+            node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
 
     metrics.phase_transition(env.now, job_id, PhaseID.UPLOAD, node.node_id)
     node.update_phase(job_id, PhaseID.UPLOAD, ram_gb=p.upload_ram_gb, vcpu=1.0)
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.upload_duration_s)
+    if _evicted():
+        node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
 
     node.remove_job(job_id)
     metrics.job_complete(t=env.now, job_id=job_id, centroid_id=job.centroid_id,

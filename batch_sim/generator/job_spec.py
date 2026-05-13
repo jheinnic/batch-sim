@@ -55,6 +55,7 @@ class JobSpec:
     # hard_cpu: burst ceiling (thread count of busiest parallel stage)
     soft_cpu: int = 0   # 0 = use profile.workhorse_declared_vcpu
     hard_cpu: int = 0   # 0 = no burst (equals soft_cpu)
+    is_cancelled: bool = False  # set by OverloadHandler when another job's check evicts this one
 
     def fresh_copy(self) -> "JobSpec":
         import copy
