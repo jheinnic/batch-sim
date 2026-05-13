@@ -15,7 +15,11 @@ from batch_sim.registry.instance_registry import InstanceRegistry
 console = Console()
 
 
-def run_one(event_list, scheduler_type, cfg, registry, event_list_path, seed=42):
+def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
+            seed=42, return_metrics=False):
+    """Run one scheduler configuration and return a Scorecard.
+    If return_metrics=True, returns (Scorecard, MetricsCollector) instead.
+    """
     metrics = MetricsCollector(); rng = random.Random(seed)
     if scheduler_type == SchedulerType.BATCH:
         from batch_sim.scheduler.batch_scheduler import BatchScheduler
@@ -31,11 +35,12 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path, seed=42)
     scheduler.finalize(engine.env)
     k8s_cap = scheduler.capacity_report() if scheduler_type == SchedulerType.K8S and hasattr(scheduler, "capacity_report") else None
     sim_horizon = event_list.metadata.get("horizon_seconds", 0)
-    return build_scorecard(scheduler_type=scheduler_type.value,
+    sc = build_scorecard(scheduler_type=scheduler_type.value,
         panic_threshold_s=cfg.panic_threshold_seconds, event_list_path=event_list_path,
         collector=metrics, accruers=scheduler.accruers,
         sla_target_seconds=cfg.sla_target_seconds, sim_horizon=sim_horizon,
         k8s_capacity_report=k8s_cap)
+    return (sc, metrics) if return_metrics else sc
 
 
 def run_experiment(event_list_path, panic_threshold_values, base_cfg, registry,

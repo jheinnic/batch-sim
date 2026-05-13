@@ -50,11 +50,18 @@ def simulate(events, scheduler, scheduler_config, registry, output, seed):
     reg = InstanceRegistry.from_yaml(registry)
     el = load_event_list(events)
     console.print(f"[bold]Running {scheduler.upper()}…[/bold]")
-    sc = run_one(event_list=el, scheduler_type=SchedulerType(scheduler),
-                 cfg=cfg, registry=reg, event_list_path=events, seed=seed)
+    sc, metrics = run_one(event_list=el, scheduler_type=SchedulerType(scheduler),
+                          cfg=cfg, registry=reg, event_list_path=events,
+                          seed=seed, return_metrics=True)
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     sc.save(output)
-    console.print(f"[green]✓ Scorecard → {output}[/green]")
+    # Save full event log so reporting tools read it back without re-simulating
+    import os
+    base = output if not output.endswith('.json') else output[:-5]
+    log_path = base + '_events.json'
+    metrics.save(log_path)
+    console.print(f"[green]✓ Scorecard  → {output}[/green]")
+    console.print(f"[green]✓ Event log  → {log_path}[/green]")
     _print_summary(sc)
 
 @cli.command()

@@ -99,63 +99,104 @@ def run_and_extract(
     cfg_path: str,
     registry_path: str,
     seed: int,
+    event_log_path: str | None = None,
 ) -> tuple[dict, dict]:
     """
-    Re-run the simulation and return:
-      (node_timelines, metadata)
+    Build node timelines from a simulation run.
 
-    node_timelines: dict[node_id] -> {
-        instance, ram_gb, hourly_usd, launch_t, ready_t, term_t, cost,
-        jobs: [ {job_id, centroid, start_t, end_t, status,
-                 phases: [(phase, start, end)]} ]
-    }
+    If event_log_path is provided (a *_events.json file saved by
+    `python -m batch_sim simulate`), reads directly from that log.
+    This guarantees charts reflect exactly the simulation whose scorecard
+    you are looking at — the same run, the same engine, the same config.
+
+    If event_log_path is absent, falls back to re-running the simulation
+    via run_one() (the same code path as the main simulate command) rather
+    than constructing a scheduler directly. This ensures at minimum that
+    both paths use the same scheduler classes and configuration handling.
     """
-    el       = load_event_list(event_list_path)
+    import json as _json
+    from batch_sim.metrics.collector import SimEvent
+
+    el           = load_event_list(event_list_path)
     job_profiles = {e.job_id: e for e in el.events}
-    cfg      = load_scheduler_config(cfg_path)
-    registry = InstanceRegistry.from_yaml(registry_path)
-    metrics  = MetricsCollector()
-    peaks    = list({e.preprocess_peak_ram_gb for e in el.events})
-    rng      = random.Random(seed)
 
-    if scheduler_type == 'batch':
-        sched = BatchScheduler(cfg=cfg, registry=registry, metrics=metrics, rng=rng)
+    if event_log_path:
+        # ── Read saved event log ───────────────────────────────────────
+        with open(event_log_path) as f:
+            raw_events = _json.load(f)
+        from batch_sim.metrics.collector import EventType as ET
+        log = []
+        for r in raw_events:
+            try:
+                et = ET(r['event_type'])
+            except ValueError:
+                continue
+            log.append(SimEvent(event_type=et, sim_time=r['sim_time'],
+                                data=r.get('data', {})))
+        registry = InstanceRegistry.from_yaml(registry_path)
+        accruers_raw = {}   # will be rebuilt from NODE events below
+        print(f"  Reading {len(log)} events from saved log")
     else:
-        sched = K8SPlusScheduler(cfg=cfg, registry=registry, metrics=metrics,
-                                  centroid_peak_rams=peaks, rng=rng)
+        # ── Re-run via run_one() (same code path as simulate command) ──
+        from batch_sim.experiment_runner import run_one
+        from batch_sim.core.config_loader import load_scheduler_config
+        from batch_sim.core.schemas import SchedulerType
 
-    engine = SimulationEngine(scheduler=sched, metrics=metrics, cfg=cfg)
-    engine.run(el)
-    sched.finalize(engine.env)
+        cfg      = load_scheduler_config(cfg_path)
+        registry = InstanceRegistry.from_yaml(registry_path)
+        cooloff  = el.metadata.get('cooloff_seconds', 0.0)
 
-    accruers = {a.node_id: a for a in sched.accruers if a.is_terminated}
+        sc, metrics = run_one(
+            event_list=el,
+            scheduler_type=SchedulerType(scheduler_type),
+            cfg=cfg,
+            registry=registry,
+            event_list_path=event_list_path,
+            seed=seed,
+            return_metrics=True,
+        )
+        log = metrics.log
+        print(f"  Re-ran simulation: {sc.job_stats.pool_job_count} jobs completed")
 
-    # Node lifecycle events
-    node_ready = {}
-    node_term  = {}
-    for e in metrics.log:
+    # ── Build node cost/instance info from NODE events ─────────────────────
+    # We reconstruct accruers from the event log directly
+    node_instances   = {}   # node_id → instance_name
+    node_launch_time = {}
+    node_ready_time  = {}
+    node_term_time   = {}
+    node_idle_dur    = {}
+
+    for e in log:
         nid = e.data.get('node_id')
         if not nid: continue
+        t   = e.sim_time
+        if e.event_type == EventType.NODE_LAUNCHING:
+            node_instances[nid]   = e.data.get('instance_name', '?')
+            node_launch_time[nid] = t
         if e.event_type == EventType.NODE_READY:
-            node_ready[nid] = e.sim_time
+            node_ready_time[nid] = t
         if e.event_type == EventType.NODE_TERMINATED:
-            node_term[nid] = e.sim_time
+            node_term_time[nid]  = t
+            node_idle_dur[nid]   = e.data.get('idle_duration_s', 0)
 
-    # Per-job phase windows
-    phase_starts = {}
+    # Rebuild cost from launch/term times and instance registry
+    inst_map = {i.name: i for i in registry.all_types}
+
+    # ── Per-job phase windows ──────────────────────────────────────────────
+    phase_starts  = {}
     phase_windows = collections.defaultdict(list)
     job_centroids = {}
     job_start_t   = {}
     job_status    = {}
 
-    for e in metrics.log:
+    for e in log:
         nid = e.data.get('node_id'); jid = e.data.get('job_id')
         if not nid or not jid: continue
         t = e.sim_time
 
         if e.event_type == EventType.JOB_START:
             job_start_t[(nid, jid)] = t
-            job_centroids[jid] = e.data.get('centroid_id', '?')
+            job_centroids[jid]      = e.data.get('centroid_id', '?')
 
         if e.event_type == EventType.PHASE_TRANSITION:
             key = (nid, jid); ph = e.data['phase']
@@ -173,33 +214,38 @@ def run_and_extract(
                 'crash' if e.event_type == EventType.JOB_CRASH else 'complete'
             )
 
-    # Assemble per-node structure
+    # ── Assemble per-node structure ────────────────────────────────────────
+    all_node_ids = set(node_launch_time.keys()) & set(node_term_time.keys())
     node_timelines = {}
-    for nid, acc in accruers.items():
+
+    for nid in all_node_ids:
+        inst_name = node_instances.get(nid, '?')
+        inst      = inst_map.get(inst_name)
+        if inst is None:
+            continue
+
+        launch_t = node_launch_time[nid]
+        term_t   = node_term_time[nid]
+        cost     = (term_t - launch_t) / 3600.0 * inst.hourly_price_usd
+
         jobs_here = []
         for (n2, jid), windows in phase_windows.items():
             if n2 != nid: continue
-            # Reservation: peak RAM for Batch, soft limit for K8S
-        prof = job_profiles.get(jid)
-        if prof and scheduler_type == 'batch':
-            res_gb = prof.preprocess_peak_ram_gb
-        elif prof:
-            res_gb = prof.preprocess_steady_ram_gb
-        else:
-            res_gb = None
+            prof = job_profiles.get(jid)
+            if scheduler_type == 'batch':
+                res_gb = prof.preprocess_peak_ram_gb if prof else None
+            else:
+                res_gb = prof.preprocess_steady_ram_gb if prof else None
 
-        # soft_cpu and hard_cpu from JobSpec if available
-        spec_soft = getattr(
-            next((s for s in [] if False), None), 'soft_cpu', None)
-        # Pull from event list job profile
-        ep = job_profiles.get(jid)
-        j_soft = ep.workhorse_declared_vcpu if ep else None
-        j_hard = j_soft   # default: no burst (populated later if JobSpec has it)
+            ep = job_profiles.get(jid)
+            j_soft = ep.workhorse_declared_vcpu if ep else None
+            j_hard = j_soft
 
-        jobs_here.append({
+            jobs_here.append({
                 'job_id':          jid,
                 'centroid':        job_centroids.get(jid, '?'),
-                'start_t':         job_start_t.get((nid, jid), windows[0][1] if windows else 0),
+                'start_t':         job_start_t.get((nid, jid),
+                                                    windows[0][1] if windows else 0),
                 'end_t':           windows[-1][2] if windows else 0,
                 'status':          job_status.get((nid, jid), 'complete'),
                 'phases':          [(ph, t0, t1) for ph, t0, t1 in windows],
@@ -209,18 +255,17 @@ def run_and_extract(
             })
         jobs_here.sort(key=lambda j: j['start_t'])
 
-        # Derive soft/hard CPU for this node from its jobs
         node_soft = max((j.get('soft_cpu') or 0 for j in jobs_here), default=0)
         node_hard = max((j.get('hard_cpu') or 0 for j in jobs_here), default=0)
 
         node_timelines[nid] = {
-            'instance':        acc.instance.name,
-            'ram_gb':          acc.instance.ram_gb,
-            'hourly_usd':      acc.instance.hourly_price_usd,
-            'launch_t':        acc.launch_time,
-            'ready_t':         node_ready.get(nid, acc.launch_time),
-            'term_t':          acc.termination_time,
-            'cost':            acc.total_cost_usd,
+            'instance':        inst_name,
+            'ram_gb':          inst.ram_gb,
+            'hourly_usd':      inst.hourly_price_usd,
+            'launch_t':        launch_t,
+            'ready_t':         node_ready_time.get(nid, launch_t),
+            'term_t':          term_t,
+            'cost':            round(cost, 4),
             'jobs':            jobs_here,
             'soft_cpu':        node_soft if node_soft > 0 else None,
             'hard_cpu':        node_hard if node_hard > 0 else None,
@@ -230,8 +275,8 @@ def run_and_extract(
         }
 
     metadata = {
-        'scheduler':  scheduler_type,
-        'event_list': event_list_path,
+        'scheduler':   scheduler_type,
+        'event_list':  event_list_path,
         'total_nodes': len(node_timelines),
         'total_jobs':  sum(len(v['jobs']) for v in node_timelines.values()),
         'total_cost':  round(sum(v['cost'] for v in node_timelines.values()), 4),
@@ -239,6 +284,7 @@ def run_and_extract(
     }
 
     return node_timelines, metadata
+
 
 
 # ---------------------------------------------------------------------------
@@ -736,18 +782,33 @@ def main() -> None:
                         help='Generate only the overview chart, not per-node charts')
     parser.add_argument('--max-per-node', type=int, default=None,
                         help='Maximum number of per-node charts to generate')
+    parser.add_argument(
+        '--event-log', default=None,
+        help=(
+            'Path to *_events.json saved by `python -m batch_sim simulate`. '
+            'When provided, charts are built from this log without re-running '
+            'the simulation. Guarantees charts match the scorecard exactly. '
+            'When absent, re-runs the simulation via run_one() (same code path '
+            'as the simulate command, but a new independent run).'
+        )
+    )
     args = parser.parse_args()
 
     out = Path(args.output or f'results/node_timelines/{args.scheduler}')
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f'Re-running {args.scheduler} simulation to extract node timelines...')
+    if args.event_log:
+        print(f'Reading saved event log: {args.event_log}')
+    else:
+        print(f'Re-running {args.scheduler} via run_one() '
+              f'(same path as simulate command)...')
     node_timelines, metadata = run_and_extract(
         event_list_path=args.events,
         scheduler_type=args.scheduler,
         cfg_path=args.scheduler_config,
         registry_path=args.registry,
         seed=args.seed,
+        event_log_path=args.event_log,
     )
     print(f'  {metadata["total_nodes"]} nodes  '
           f'{metadata["total_jobs"]} jobs  '
