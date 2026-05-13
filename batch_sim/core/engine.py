@@ -128,10 +128,12 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
     metrics.phase_transition(env.now, job_id, PhaseID.DOWNLOAD, node.node_id)
     node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0,
                  soft_limit_gb=p.soft_limit_ram_gb)
+    scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.download_duration_s)
 
     metrics.phase_transition(env.now, job_id, PhaseID.PREPROCESS, node.node_id)
     node.update_phase(job_id, PhaseID.PREPROCESS, ram_gb=p.preprocess_peak_ram_gb, vcpu=p.preprocess_vcpu)
+    scheduler.cpu_boost(env, node, metrics)
     victim = overload_handler.check_and_handle(env, node)
     if victim == job_id:
         node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
@@ -142,10 +144,12 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
     for stage in p.stages:
         node.update_phase(job_id, PhaseID.WORKHORSE, ram_gb=p.workhorse_ram_gb,
                           vcpu=stage.effective_threads)
+        scheduler.cpu_boost(env, node, metrics)
         yield env.timeout(stage.wall_clock_seconds)
 
     metrics.phase_transition(env.now, job_id, PhaseID.UPLOAD, node.node_id)
     node.update_phase(job_id, PhaseID.UPLOAD, ram_gb=p.upload_ram_gb, vcpu=1.0)
+    scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.upload_duration_s)
 
     node.remove_job(job_id)

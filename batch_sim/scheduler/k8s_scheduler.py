@@ -140,6 +140,10 @@ class K8SScheduler:
             accruer = self._accruers.get(node.node_id)
             if accruer: accruer.terminate(env.now)
 
+    def cpu_boost(self, env, node, metrics):
+        from batch_sim.scheduler.cpu_boost_integration import run_cpu_boost_k8s
+        run_cpu_boost_k8s(env, node, metrics)
+
     @property
     def accruers(self): return list(self._accruers.values())
 

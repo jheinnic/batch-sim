@@ -98,6 +98,7 @@ def run_job_process_plus(
     # Phase 1: Download
     metrics.phase_transition(env.now, job_id, PhaseID.DOWNLOAD, node.node_id)
     node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0)
+    scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.download_duration_s)
 
     # Phase 2: Pre-process — acquire semaphore first
@@ -114,6 +115,7 @@ def run_job_process_plus(
     metrics.phase_transition(env.now, job_id, PhaseID.PREPROCESS, node.node_id)
     node.update_phase(job_id, PhaseID.PREPROCESS,
                       ram_gb=p.preprocess_peak_ram_gb, vcpu=p.preprocess_vcpu)
+    scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.preprocess_duration_s)
     sem.release()
 
@@ -123,11 +125,13 @@ def run_job_process_plus(
     for stage in p.stages:
         node.update_phase(job_id, PhaseID.WORKHORSE,
                           ram_gb=p.workhorse_ram_gb, vcpu=stage.effective_threads)
+        scheduler.cpu_boost(env, node, metrics)
         yield env.timeout(stage.wall_clock_seconds)
 
     # Phase 4: Upload
     metrics.phase_transition(env.now, job_id, PhaseID.UPLOAD, node.node_id)
     node.update_phase(job_id, PhaseID.UPLOAD, ram_gb=p.upload_ram_gb, vcpu=1.0)
+    scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.upload_duration_s)
 
     node.remove_job(job_id)
@@ -331,6 +335,10 @@ class K8SPlusScheduler:
             accruer = self._accruers.get(node.node_id)
             if accruer:
                 accruer.terminate(env.now)
+
+    def cpu_boost(self, env, node, metrics):
+        from batch_sim.scheduler.cpu_boost_integration import run_cpu_boost_k8s
+        run_cpu_boost_k8s(env, node, metrics)
 
     @property
     def accruers(self):
