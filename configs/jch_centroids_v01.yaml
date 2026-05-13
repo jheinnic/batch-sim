@@ -29,11 +29,12 @@ centroids:
     preprocess_memory_exponent_a: 3.575
     preprocess_memory_exponent_b: 0.3
     preprocess_duration_seconds: 95
-    workhorse_cpu_stages: [600, 45, 1200, 30, 900, 40, 600, 25]
-    workhorse_thread_counts: [2, 16, 12, 4]
-    workhorse_io_wait_per_stage: [0.7, 0.08, 0.02, 0.3]
+    workhorse_cpu_stages: [400, 45, 1200, 30, 900, 40, 800, 25]
+    workhorse_soft_vcpu: [2, 4, 4, 2]
+    workhorse_hard_vcpu: [4, 16, 12, 8]
+    workhorse_io_wait_per_stage: [0.6, 0.08, 0.02, 0.3]
     io_wait_fraction: 0.4
-    upload_gb: 512.0
+    upload_gb: 16
   - id: type2
     label: "Haul2"
     description: "General-purpose moderate batch workloads."
@@ -48,7 +49,8 @@ centroids:
     preprocess_memory_exponent_b: 0.472
     preprocess_duration_seconds: 20
     workhorse_cpu_stages: [320, 30, 180, 25]
-    workhorse_thread_counts: [16, 4]
+    workhorse_soft_vcpu: [2, 2]
+    workhorse_hard_vcpu: [16, 4]
     workhorse_io_wait_per_stage: [0.06, 0.35]
     io_wait_fraction: 0.28
     upload_gb: 0.25
@@ -67,7 +69,8 @@ centroids:
     preprocess_memory_exponent_b: 0.1
     preprocess_duration_seconds: 40
     workhorse_cpu_stages: [400, 35, 800, 30, 400, 25]
-    workhorse_thread_counts: [2, 8, 4]
+    workhorse_soft_vcpu: [2, 4, 4]
+    workhorse_hard_vcpu: [2, 8, 4]
     workhorse_io_wait_per_stage: [0.65, 0.05, 0.25]
     io_wait_fraction: 0.25
-    upload_gb: 128.0
+    upload_gb: 96
