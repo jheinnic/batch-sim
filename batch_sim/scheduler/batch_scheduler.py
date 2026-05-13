@@ -34,7 +34,7 @@ class BatchScheduler:
     def on_job_complete(self, env, node, job):
         p = job.profile
         node.allocated_ram_gb = max(0.0, node.allocated_ram_gb - p.peak_ram_gb)
-        node.allocated_vcpu = max(0.0, node.allocated_vcpu - p.workhorse_declared_vcpu)
+        node.allocated_vcpu = max(0.0, node.allocated_vcpu - (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         if node.job_count == 0:
             node.state = NodeStateEnum.IDLE; node.idle_since = env.now
@@ -47,9 +47,9 @@ class BatchScheduler:
         for node in self._nodes.values():
             if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
                     and node.node_id not in self._reserved
-                    and self._batch_fits(node, p.peak_ram_gb, p.workhorse_declared_vcpu)):
+                    and self._batch_fits(node, p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))):
                 self._reserved[node.node_id] = job.job_id; return
-        instance = self.registry.cheapest_fitting(p.peak_ram_gb, p.workhorse_declared_vcpu)
+        instance = self.registry.cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         if instance: env.process(self._launch_node(env, instance, for_job=job))
 
     def _try_schedule(self, env):
@@ -70,12 +70,13 @@ class BatchScheduler:
 
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile
-        best = self._best_fit_node(p.peak_ram_gb, p.workhorse_declared_vcpu, job.job_id)
+        _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
+        best = self._best_fit_node(p.peak_ram_gb, _vcpu, job.job_id)
         if best is None: return False
         mon = self._panic_monitors.pop(job.job_id, None)
         if mon and mon.is_alive: mon.interrupt("placed")
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
-        best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += p.workhorse_declared_vcpu
+        best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += _vcpu
         if best.state == NodeStateEnum.IDLE: best.state = NodeStateEnum.READY
         env.process(run_job_process(env=env, job=job, node=best, metrics=self.metrics,
             overload_handler=self._overload_handler, arrival_time=entry.arrival_time,

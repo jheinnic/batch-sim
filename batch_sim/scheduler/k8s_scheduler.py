@@ -44,7 +44,7 @@ class K8SScheduler:
     def on_job_complete(self, env, node, job):
         soft = job.profile.soft_limit_ram_gb
         node.allocated_ram_gb = max(0.0, node.allocated_ram_gb - soft)
-        node.allocated_vcpu = max(0.0, node.allocated_vcpu - job.profile.workhorse_declared_vcpu)
+        node.allocated_vcpu = max(0.0, node.allocated_vcpu - (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu))
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         if node.job_count == 0:
             node.state = NodeStateEnum.IDLE; node.idle_since = env.now
@@ -53,7 +53,7 @@ class K8SScheduler:
         self._try_schedule(env)
 
     def guarantee_capacity(self, env, job):
-        soft = job.profile.soft_limit_ram_gb; vcpu = job.profile.workhorse_declared_vcpu
+        soft = job.profile.soft_limit_ram_gb; vcpu = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
         for node in self._nodes.values():
             if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
                     and node.node_id not in self._reserved
@@ -81,7 +81,7 @@ class K8SScheduler:
 
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile
-        soft = p.soft_limit_ram_gb; vcpu = p.workhorse_declared_vcpu
+        soft = p.soft_limit_ram_gb; vcpu = (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu)
         best = self._best_fit_node(soft, vcpu, job.job_id)
         if best is None: return False
         mon = self._panic_monitors.pop(job.job_id, None)

@@ -53,9 +53,11 @@ from dataclasses import dataclass, field
 class JobCPUState:
     """CPU state for one job on a node at a point in time."""
     job_id:          str
-    soft_cpu:        int      # guaranteed reservation
-    hard_cpu:        int      # burst ceiling (thread count)
+    soft_cpu:        int      # guaranteed reservation (scheduler signal)
+    hard_cpu:        int      # burst ceiling (declared quota)
     io_wait:         float    # current stage io_wait fraction
+    stage_threads:   int = 0  # physical thread count for current stage;
+                              # 0 = unconstrained (use hard_cpu as ceiling)
     boost_alloc:     float = 0.0   # set by solver: soft + boost grant
     effective_vcpu:  float = 0.0   # boost_alloc × (1 - io_wait)
     wasted_vcpu:     float = 0.0   # returned cycles that went nowhere

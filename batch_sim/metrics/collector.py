@@ -22,6 +22,7 @@ class EventType(str, Enum):
     NODE_IDLE        = "node_idle"
     NODE_TERMINATED  = "node_terminated"
     COST_SAMPLE      = "cost_sample"
+    CPU_WASTE        = "cpu_waste"     # BSIM-71: wasted vCPU-seconds per node
 
 
 class PhaseID(str, Enum):
