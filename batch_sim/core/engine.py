@@ -160,10 +160,24 @@ class SimulationEngine:
         self.scheduler = scheduler; self.metrics = metrics; self.cfg = cfg
         self.env = simpy.Environment()
 
-    def run(self, event_list):
+    def run(self, event_list, cooloff_seconds: float = 0.0):
+        """
+        Run the simulation.
+
+        Arrivals are scheduled from the event list (all within horizon_seconds).
+        The SimPy environment runs until the last arrival completes or until
+        horizon_seconds + cooloff_seconds, whichever comes first in practice.
+        cooloff_seconds gives in-flight jobs time to finish after the last
+        arrival without being truncated at the horizon boundary.
+        """
         for event in event_list.events:
             self.env.process(self._arrival_process(event))
-        self.env.run()
+        # Run until all processes complete naturally; cooloff is implicit
+        # because no new arrivals are scheduled after horizon_seconds.
+        # If a hard cutoff is needed: self.env.run(until=until)
+        until = (event_list.metadata.get("horizon_seconds", 0)
+                 + cooloff_seconds) if cooloff_seconds > 0 else None
+        self.env.run(until=until)
 
     def _arrival_process(self, event):
         yield self.env.timeout(event.arrival_time)

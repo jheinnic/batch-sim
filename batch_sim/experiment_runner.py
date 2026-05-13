@@ -26,7 +26,8 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path, seed=42)
         scheduler = K8SScheduler(cfg=cfg, registry=registry, metrics=metrics,
                                   centroid_peak_rams=centroid_peak_rams, rng=rng)
     engine = SimulationEngine(scheduler=scheduler, metrics=metrics, cfg=cfg)
-    engine.run(event_list)
+    cooloff = event_list.metadata.get("cooloff_seconds", 0.0)
+    engine.run(event_list, cooloff_seconds=cooloff)
     scheduler.finalize(engine.env)
     k8s_cap = scheduler.capacity_report() if scheduler_type == SchedulerType.K8S and hasattr(scheduler, "capacity_report") else None
     sim_horizon = event_list.metadata.get("horizon_seconds", 0)

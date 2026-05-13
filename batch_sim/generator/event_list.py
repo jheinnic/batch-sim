@@ -151,6 +151,7 @@ def build_event_list(config: SimulationConfig) -> EventList:
         "network_bandwidth_mbps": config.network_bandwidth_mbps,
         "centroid_ids": [c.id for c in config.centroids],
         "total_jobs": len(events),
+        "cooloff_seconds": config.cooloff_seconds,
         "burst_params": {
             c.id: {"min": c.burst_size_min, "max": c.burst_size_max}
             for c in config.centroids

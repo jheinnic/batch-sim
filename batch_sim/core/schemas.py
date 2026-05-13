@@ -142,6 +142,16 @@ class SimulationConfig(BaseModel):
     horizon_seconds: PositiveFloat
     random_seed: int = 42
     network_bandwidth_mbps: PositiveFloat = 500.0
+    cooloff_seconds: float = Field(
+        default=0.0, ge=0.0,
+        description=(
+            "Extra simulation time after horizon_seconds during which "
+            "no new jobs arrive but running jobs are allowed to finish. "
+            "Prevents horizon truncation of jobs that start near the end "
+            "of the arrival window. Total sim duration = "
+            "horizon_seconds + cooloff_seconds."
+        )
+    )
     centroids: list[CentroidConfig] = Field(..., min_length=1)
 
     @model_validator(mode="after")

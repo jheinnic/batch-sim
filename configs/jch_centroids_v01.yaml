@@ -7,7 +7,8 @@
 
 horizon_seconds: 86400
 random_seed: 3816
-network_bandwidth_mbps: 500
+cooloff_seconds: 3600  # 1-hour tail after horizon; no new arrivals, running jobs finish
+network_bandwidth_mbps: 10000  # 10 Gbps — conservative sustained estimate for m7i/r7i/c7i instances
 
 arrival_multiplier_by_hour:
   [0.10, 0.08, 0.07, 0.07, 0.08, 0.12,   # 00-05 (overnight trough)
