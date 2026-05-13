@@ -67,6 +67,8 @@ class JobArrivalEvent:
     workhorse_ram_gb: float
     upload_duration_s: float
     upload_ram_gb: float
+    soft_cpu: int = 0   # BSIM-69: K8S soft limit (scheduler reservation)
+    hard_cpu: int = 0   # BSIM-69: K8S hard limit (burst ceiling = thread count)
 
     def to_job_spec(self) -> JobSpec:
         stages = [
@@ -91,7 +93,9 @@ class JobArrivalEvent:
             upload_duration_s=self.upload_duration_s,
             upload_ram_gb=self.upload_ram_gb,
         )
-        return JobSpec(job_id=self.job_id, centroid_id=self.centroid_id, profile=profile)
+        return JobSpec(job_id=self.job_id, centroid_id=self.centroid_id,
+                       profile=profile,
+                       soft_cpu=self.soft_cpu, hard_cpu=self.hard_cpu)
 
 
 def _event_from_job(arrival_time, job):
@@ -112,6 +116,7 @@ def _event_from_job(arrival_time, job):
         workhorse_declared_vcpu=p.workhorse_declared_vcpu,
         workhorse_ram_gb=p.workhorse_ram_gb,
         upload_duration_s=p.upload_duration_s, upload_ram_gb=p.upload_ram_gb,
+        soft_cpu=job.soft_cpu, hard_cpu=job.hard_cpu,
     )
 
 

@@ -21,7 +21,15 @@ class CentroidConfig(BaseModel):
     preprocess_memory_exponent_b: PositiveFloat
     preprocess_duration_seconds: PositiveFloat = Field(..., le=120.0)
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
-    workhorse_thread_counts: list[PositiveInt]
+    workhorse_thread_counts: list[PositiveInt] | None = Field(
+        default=None,
+        description=(
+            "Declared thread counts per parallel stage. "
+            "When workhorse_hard_vcpu is provided, that array serves "
+            "the same purpose and this field may be omitted. "
+            "If both are absent, validation will fail."
+        )
+    )
     io_wait_fraction: Fraction
     workhorse_soft_vcpu: list[int] | None = Field(
         default=None,
@@ -79,11 +87,23 @@ class CentroidConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_stage_arrays(self) -> "CentroidConfig":
-        stages  = self.workhorse_cpu_stages
-        threads = self.workhorse_thread_counts
+        stages = self.workhorse_cpu_stages
         if len(stages) % 2 != 0:
             raise ValueError(f"workhorse_cpu_stages must have even length; got {len(stages)}")
         expected = len(stages) // 2
+
+        # workhorse_thread_counts is optional when workhorse_hard_vcpu is provided
+        # In that case, hard_vcpu serves as the thread count declaration
+        if self.workhorse_thread_counts is None:
+            if self.workhorse_hard_vcpu is None:
+                raise ValueError(
+                    "Either workhorse_thread_counts or workhorse_hard_vcpu "
+                    "must be provided (thread count declaration is required)"
+                )
+            # Derive thread counts from hard_vcpu array
+            object.__setattr__(self, "workhorse_thread_counts",
+                               list(self.workhorse_hard_vcpu))
+        threads = self.workhorse_thread_counts
         if len(threads) != expected:
             raise ValueError(
                 f"workhorse_thread_counts must have {expected} entries; got {len(threads)}"
