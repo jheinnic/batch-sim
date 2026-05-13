@@ -73,4 +73,4 @@ centroids:
     workhorse_hard_vcpu: [2, 8, 4]
     workhorse_io_wait_per_stage: [0.65, 0.05, 0.25]
     io_wait_fraction: 0.25
-    upload_gb: 96
+    upload_gb: 64
