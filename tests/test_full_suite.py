@@ -12,28 +12,28 @@ class TestPhaseProfile:
     def test_download_duration(self):
         p = build_phase_profile(download_gb=5.0, preprocess_a=1.0, preprocess_b=1.5,
             preprocess_duration_s=30.0, workhorse_cpu_stages=[60.0, 10.0],
-            workhorse_thread_counts=[4], io_wait_fraction=0.25, upload_gb=0.5,
+            workhorse_hard_vcpu=[4], io_wait_fraction=0.25, upload_gb=0.5,
             network_bandwidth_mbps=500.0)
         assert abs(p.download_duration_s - 10.0) < 0.01
 
     def test_peak_ram_super_linear(self):
         p = build_phase_profile(download_gb=10.0, preprocess_a=1.2, preprocess_b=1.5,
             preprocess_duration_s=30.0, workhorse_cpu_stages=[60.0, 10.0],
-            workhorse_thread_counts=[4], io_wait_fraction=0.0, upload_gb=1.0,
+            workhorse_hard_vcpu=[4], io_wait_fraction=0.0, upload_gb=1.0,
             network_bandwidth_mbps=500.0)
         assert abs(p.preprocess_peak_ram_gb - 1.2 * (10.0 ** 1.5)) < 0.01
 
     def test_steady_state_8_pct(self):
         p = build_phase_profile(download_gb=8.0, preprocess_a=1.3, preprocess_b=1.4,
             preprocess_duration_s=40.0, workhorse_cpu_stages=[100.0, 15.0],
-            workhorse_thread_counts=[8], io_wait_fraction=0.20, upload_gb=0.8,
+            workhorse_hard_vcpu=[8], io_wait_fraction=0.20, upload_gb=0.8,
             network_bandwidth_mbps=500.0)
         assert abs(p.preprocess_steady_ram_gb - 0.08 * p.preprocess_peak_ram_gb) < 1e-9
 
     def test_parallel_odd_serial(self):
         p = build_phase_profile(download_gb=1.0, preprocess_a=1.0, preprocess_b=1.0,
             preprocess_duration_s=10.0, workhorse_cpu_stages=[100.0, 20.0, 200.0, 15.0],
-            workhorse_thread_counts=[4, 4], io_wait_fraction=0.0, upload_gb=0.1,
+            workhorse_hard_vcpu=[4, 4], io_wait_fraction=0.0, upload_gb=0.1,
             network_bandwidth_mbps=500.0)
         assert p.stages[0].declared_threads == 4
         assert p.stages[1].declared_threads == 1

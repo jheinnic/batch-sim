@@ -35,7 +35,7 @@ centroids:
     preprocess_memory_exponent_b: 1.5
     preprocess_duration_seconds: 45
     workhorse_cpu_stages: [300, 20, 800, 15, 200, 10]
-    workhorse_thread_counts: [8, 8, 8]
+    workhorse_hard_vcpu: [8, 8, 8]
     io_wait_fraction: 0.40            # scalar fallback (required)
     workhorse_io_wait_per_stage:      # per-stage override (optional)
       - 0.70    # stage 0: reading compressed input  → 30% CPU efficiency

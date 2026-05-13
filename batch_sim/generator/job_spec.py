@@ -63,7 +63,7 @@ class JobSpec:
 
 def build_phase_profile(
     *, download_gb, preprocess_a, preprocess_b, preprocess_duration_s,
-    workhorse_cpu_stages, workhorse_thread_counts, io_wait_fraction,
+    workhorse_cpu_stages, workhorse_hard_vcpu, io_wait_fraction,
     upload_gb, network_bandwidth_mbps,
     io_wait_fractions: list[float] | None = None,
 ) -> PhaseProfile:
@@ -87,7 +87,7 @@ def build_phase_profile(
 
     for i, cpu_seconds in enumerate(workhorse_cpu_stages):
         if i % 2 == 0:
-            declared = workhorse_thread_counts[parallel_idx]
+            declared = workhorse_hard_vcpu[parallel_idx]
             # Use per-stage wait if provided, else fall back to scalar
             stage_wait = (
                 io_wait_fractions[parallel_idx]

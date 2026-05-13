@@ -50,7 +50,7 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
     # the same multiplier as download_gb causes declared_vcpu to balloon
     # (e.g. 16 threads * 3x multiplier = 48 vcpu), leaving room for only
     # one job per node regardless of available RAM.
-    perturbed_threads = list(centroid.workhorse_thread_counts)
+    perturbed_threads = list(centroid.workhorse_hard_vcpu)
     # Per-stage I/O wait — independent perturbation per stage if specified
     if centroid.workhorse_io_wait_per_stage is not None:
         io_wait_fractions = [
@@ -70,7 +70,7 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
         download_gb=download_gb, preprocess_a=a, preprocess_b=b,
         preprocess_duration_s=preprocess_duration_s,
         workhorse_cpu_stages=perturbed_stages,
-        workhorse_thread_counts=perturbed_threads,
+        workhorse_hard_vcpu=perturbed_threads,
         io_wait_fraction=io_wait, upload_gb=upload_gb,
         network_bandwidth_mbps=network_bandwidth_mbps,
         io_wait_fractions=io_wait_fractions,

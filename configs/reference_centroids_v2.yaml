@@ -26,7 +26,7 @@ centroids:
     preprocess_memory_exponent_b: 1.4
     preprocess_duration_seconds: 30
     workhorse_cpu_stages: [120, 20, 180, 15]
-    workhorse_thread_counts: [4, 4]
+    workhorse_hard_vcpu: [4, 4]
     io_wait_fraction: 0.30
     upload_gb: 0.5
 
@@ -40,7 +40,7 @@ centroids:
     preprocess_memory_exponent_b: 1.6
     preprocess_duration_seconds: 55
     workhorse_cpu_stages: [300, 30, 600, 25, 300, 20]
-    workhorse_thread_counts: [8, 8, 8]
+    workhorse_hard_vcpu: [8, 8, 8]
     io_wait_fraction: 0.25
     upload_gb: 4.0
 
@@ -54,7 +54,7 @@ centroids:
     preprocess_memory_exponent_b: 1.3
     preprocess_duration_seconds: 40
     workhorse_cpu_stages: [600, 45, 1200, 30, 900, 40, 600, 25]
-    workhorse_thread_counts: [16, 16, 16, 16]
+    workhorse_hard_vcpu: [16, 16, 16, 16]
     io_wait_fraction: 0.20
     upload_gb: 1.2
 
@@ -68,7 +68,7 @@ centroids:
     preprocess_memory_exponent_b: 1.5
     preprocess_duration_seconds: 45
     workhorse_cpu_stages: [400, 35, 800, 30, 400, 25]
-    workhorse_thread_counts: [8, 8, 8]
+    workhorse_hard_vcpu: [8, 8, 8]
     io_wait_fraction: 0.28
     upload_gb: 2.0
 
@@ -85,6 +85,6 @@ centroids:
     preprocess_memory_exponent_b: 1.7
     preprocess_duration_seconds: 90
     workhorse_cpu_stages: [60, 15, 60, 10]
-    workhorse_thread_counts: [4, 4]
+    workhorse_hard_vcpu: [4, 4]
     io_wait_fraction: 0.35
     upload_gb: 1.0

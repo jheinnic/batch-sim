@@ -16,7 +16,7 @@ def small_centroid():
         download_gb=2.0, preprocess_memory_exponent_a=1.2,
         preprocess_memory_exponent_b=1.4, preprocess_duration_seconds=20.0,
         workhorse_cpu_stages=[60.0, 10.0, 120.0, 8.0],
-        workhorse_thread_counts=[4, 4], io_wait_fraction=0.30, upload_gb=0.2)
+        workhorse_hard_vcpu=[4, 4], io_wait_fraction=0.30, upload_gb=0.2)
 
 @pytest.fixture
 def large_centroid():
@@ -25,7 +25,7 @@ def large_centroid():
         download_gb=30.0, preprocess_memory_exponent_a=1.5,
         preprocess_memory_exponent_b=1.6, preprocess_duration_seconds=50.0,
         workhorse_cpu_stages=[300.0, 25.0, 600.0, 20.0],
-        workhorse_thread_counts=[8, 8], io_wait_fraction=0.25, upload_gb=3.0)
+        workhorse_hard_vcpu=[8, 8], io_wait_fraction=0.25, upload_gb=3.0)
 
 @pytest.fixture
 def sim_config(small_centroid, large_centroid):

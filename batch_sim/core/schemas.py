@@ -21,22 +21,13 @@ class CentroidConfig(BaseModel):
     preprocess_memory_exponent_b: PositiveFloat
     preprocess_duration_seconds: PositiveFloat = Field(..., le=120.0)
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
-    workhorse_thread_counts: list[PositiveInt] | None = Field(
-        default=None,
-        description=(
-            "Declared thread counts per parallel stage. "
-            "When workhorse_hard_vcpu is provided, that array serves "
-            "the same purpose and this field may be omitted. "
-            "If both are absent, validation will fail."
-        )
-    )
     io_wait_fraction: Fraction
     workhorse_soft_vcpu: list[int] | None = Field(
         default=None,
         description=(
             "Optional per-parallel-stage minimum vCPU guarantee. "
             "Scheduler reserves max(workhorse_soft_vcpu) per job. "
-            "When absent, max(workhorse_thread_counts) is used (current behaviour)."
+            "When absent, max(workhorse_hard_vcpu) is used."
         )
     )
     workhorse_hard_vcpu: list[int] | None = Field(
@@ -92,39 +83,16 @@ class CentroidConfig(BaseModel):
             raise ValueError(f"workhorse_cpu_stages must have even length; got {len(stages)}")
         expected = len(stages) // 2
 
-        # Thread count declaration: workhorse_hard_vcpu is the canonical field.
-        # workhorse_thread_counts is a deprecated alias.
-        # Rules:
-        #   hard_vcpu only         → derive thread_counts from hard_vcpu
-        #   thread_counts only     → derive hard_vcpu from thread_counts
-        #   both, same values      → accept (redundant but not contradictory)
-        #   both, different values → reject (contradictory declarations)
-        #   neither                → reject (thread count required)
-        if self.workhorse_hard_vcpu is None and self.workhorse_thread_counts is None:
-            raise ValueError(
-                "Either workhorse_hard_vcpu or workhorse_thread_counts must be "
-                "provided. workhorse_hard_vcpu is the preferred field."
-            )
-        if self.workhorse_hard_vcpu is not None and self.workhorse_thread_counts is not None:
-            if list(self.workhorse_hard_vcpu) != list(self.workhorse_thread_counts):
-                raise ValueError(
-                    f"workhorse_hard_vcpu {list(self.workhorse_hard_vcpu)} and "
-                    f"workhorse_thread_counts {list(self.workhorse_thread_counts)} "
-                    f"both provided with different values. They declare the same "
-                    f"thing (thread count per parallel stage). Remove "
-                    f"workhorse_thread_counts and use workhorse_hard_vcpu only."
-                )
-        # Reconcile: ensure both fields are set to the same value
+        # workhorse_hard_vcpu is the sole thread count declaration.
         if self.workhorse_hard_vcpu is None:
-            object.__setattr__(self, "workhorse_hard_vcpu",
-                               list(self.workhorse_thread_counts))
-        if self.workhorse_thread_counts is None:
-            object.__setattr__(self, "workhorse_thread_counts",
-                               list(self.workhorse_hard_vcpu))
-        threads = self.workhorse_thread_counts
+            raise ValueError(
+                "workhorse_hard_vcpu is required (one entry per parallel stage). "
+                "It declares the thread count and hard CPU ceiling for each stage."
+            )
+        threads = list(self.workhorse_hard_vcpu)
         if len(threads) != expected:
             raise ValueError(
-                f"workhorse_hard_vcpu / workhorse_thread_counts must have "
+                f"workhorse_hard_vcpu must have "
                 f"{expected} entries (one per parallel stage); got {len(threads)}"
             )
         if self.workhorse_io_wait_per_stage is not None:
