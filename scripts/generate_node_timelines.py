@@ -188,6 +188,14 @@ def run_and_extract(
         else:
             res_gb = None
 
+        # soft_cpu and hard_cpu from JobSpec if available
+        spec_soft = getattr(
+            next((s for s in [] if False), None), 'soft_cpu', None)
+        # Pull from event list job profile
+        ep = job_profiles.get(jid)
+        j_soft = ep.workhorse_declared_vcpu if ep else None
+        j_hard = j_soft   # default: no burst (populated later if JobSpec has it)
+
         jobs_here.append({
                 'job_id':          jid,
                 'centroid':        job_centroids.get(jid, '?'),
@@ -196,18 +204,29 @@ def run_and_extract(
                 'status':          job_status.get((nid, jid), 'complete'),
                 'phases':          [(ph, t0, t1) for ph, t0, t1 in windows],
                 'reserved_ram_gb': round(res_gb, 1) if res_gb else None,
+                'soft_cpu':        j_soft,
+                'hard_cpu':        j_hard,
             })
         jobs_here.sort(key=lambda j: j['start_t'])
 
+        # Derive soft/hard CPU for this node from its jobs
+        node_soft = max((j.get('soft_cpu') or 0 for j in jobs_here), default=0)
+        node_hard = max((j.get('hard_cpu') or 0 for j in jobs_here), default=0)
+
         node_timelines[nid] = {
-            'instance':   acc.instance.name,
-            'ram_gb':     acc.instance.ram_gb,
-            'hourly_usd': acc.instance.hourly_price_usd,
-            'launch_t':   acc.launch_time,
-            'ready_t':    node_ready.get(nid, acc.launch_time),
-            'term_t':     acc.termination_time,
-            'cost':       acc.total_cost_usd,
-            'jobs':       jobs_here,
+            'instance':        acc.instance.name,
+            'ram_gb':          acc.instance.ram_gb,
+            'hourly_usd':      acc.instance.hourly_price_usd,
+            'launch_t':        acc.launch_time,
+            'ready_t':         node_ready.get(nid, acc.launch_time),
+            'term_t':          acc.termination_time,
+            'cost':            acc.total_cost_usd,
+            'jobs':            jobs_here,
+            'soft_cpu':        node_soft if node_soft > 0 else None,
+            'hard_cpu':        node_hard if node_hard > 0 else None,
+            'reserved_ram_gb': round(max(
+                (j.get('reserved_ram_gb') or 0 for j in jobs_here), default=0
+            ), 1),
         }
 
     metadata = {
@@ -361,6 +380,12 @@ def chart_overview(
     out: Path,
     scheduler_type: str = 'batch',
 ) -> None:
+    """
+    Overview chart: all nodes.
+    Layout: Gantt (top panel, time left→right) stacked above
+            CPU/RAM usage (bottom panel, same time axis).
+    Left labels show: instance type, cost, job count, soft/hard CPU limits.
+    """
     nodes = sorted(node_timelines.values(), key=lambda n: n['launch_t'])
     if not nodes:
         return
@@ -373,38 +398,40 @@ def chart_overview(
 
     n_nodes = len(nodes)
     row_h   = max(0.35, min(0.9, 36 / n_nodes))
-    fig_h   = max(5, n_nodes * row_h * 1.35 + 2.5)
+    gantt_h = max(4, n_nodes * row_h * 1.35 + 1.5)
+    usage_h = 2.5
+    fig_w   = 18
 
-    # Two panels side by side: Gantt 70%, usage bars 30%
-    fig = plt.figure(figsize=(18, fig_h))
-    gs  = fig.add_gridspec(1, 2, width_ratios=[7, 3], wspace=0.06)
+    fig = plt.figure(figsize=(fig_w, gantt_h + usage_h + 0.8))
+    gs  = fig.add_gridspec(2, 1, height_ratios=[gantt_h, usage_h],
+                            hspace=0.08)
     ax_gantt = fig.add_subplot(gs[0])
-    ax_usage = fig.add_subplot(gs[1], sharey=None)
+    ax_usage = fig.add_subplot(gs[1], sharex=ax_gantt)
 
-    # ── Left: Gantt ────────────────────────────────────────────────────
-    gantt_w = 12   # logical width for t_scale
-    t_scale = gantt_w / t_span
+    # ── Shared time scale ─────────────────────────────────────────────
+    t_scale = (fig_w - 2) / t_span   # px per second (relative to fig width)
 
+    # ── Top panel: Gantt ──────────────────────────────────────────────
     for i, node in enumerate(nodes):
-        y = i
+        y = n_nodes - 1 - i   # top node = highest y
         _draw_node_row(ax_gantt, node, y, row_h, t_min, t_scale,
-                       gantt_w, scheduler_type=scheduler_type)
-        label = (f"{node['instance']}  "
-                 f"${node['cost']:.2f}  "
-                 f"({len(node['jobs'])}j)")
-        ax_gantt.text(-0.01, y, label,
-                      transform=ax_gantt.get_yaxis_transform(),
-                      ha='right', va='center', fontsize=6.5, fontfamily=FONT)
+                       fig_w, scheduler_type=scheduler_type)
 
-    tick_s = _nice_tick_seconds(t_span)
-    ticks  = np.arange(0, t_span + tick_s, tick_s)
-    ax_gantt.set_xticks(ticks * t_scale)
-    ax_gantt.set_xticklabels(
-        [f'{t/60:.0f}m' for t in ticks], fontsize=8, fontfamily=FONT)
-    ax_gantt.set_xlim(0, t_span * t_scale)
+        # Left label: instance  $cost  (Nj)  soft/hard CPU  RAM limit
+        soft = node.get('soft_cpu', '?')
+        hard = node.get('hard_cpu', '?')
+        ram  = node.get('reserved_ram_gb', node['ram_gb'])
+        label = (f"{node['instance']}  ${node['cost']:.2f}"
+                 f"  ({len(node['jobs'])}j)"
+                 f"  cpu:{soft}/{hard}  ram:{ram:.0f}G")
+        ax_gantt.text(-0.005, y, label,
+                      transform=ax_gantt.get_yaxis_transform(),
+                      ha='right', va='center', fontsize=6, fontfamily=FONT)
+
     ax_gantt.set_ylim(-0.8, n_nodes - 0.2)
     ax_gantt.set_yticks([])
-    ax_gantt.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
+    ax_gantt.set_xlim(0, t_span * t_scale)
+    ax_gantt.tick_params(axis='x', labelbottom=False)   # shared axis labels below
     ax_gantt.set_facecolor('#fafaf9')
     ax_gantt.grid(True, axis='x', alpha=0.15, zorder=1)
     ax_gantt.legend(handles=_legend_handles(), fontsize=7,
@@ -414,75 +441,69 @@ def chart_overview(
     ax_gantt.set_title(
         f'{sched_label} — Node Lifecycles  '
         f'{n_nodes} nodes · {metadata["total_jobs"]} jobs · '
-        f'${metadata["total_cost"]:.2f}',
-        fontfamily=FONT, fontsize=10, loc='left',
+        f'${metadata["total_cost"]:.2f}  '
+        f'(left labels: instance  cost  jobs  cpu:soft/hard  ram:limit)',
+        fontfamily=FONT, fontsize=9, loc='left',
     )
 
-    # ── Right: CPU and RAM usage bars ─────────────────────────────────
+    # ── Bottom panel: CPU and RAM over time (time = x axis) ───────────
     series = _build_usage_series(node_timelines, sample_s=max(60, t_span / 80))
     if series:
-        ts        = [s['t'] / t_span for s in series]   # normalised 0–1
-        used_ram  = [s['used_ram']  for s in series]
-        alloc_ram = [s['alloc_ram'] for s in series]
-        used_cpu  = [s['used_vcpu'] for s in series]
+        ts_px    = [s['t'] * t_scale for s in series]
+        used_ram = [s['used_ram']    for s in series]
+        alloc_ram= [s['alloc_ram']   for s in series]
+        used_cpu = [s['used_vcpu']   for s in series]
+        max_alloc= max(alloc_ram) if alloc_ram else 1
+        max_cpu  = max(used_cpu)  if used_cpu  else 1
 
-        # Map time axis to the Gantt y-axis range so ticks align visually
-        # (time runs top→bottom on the usage panel to match node order)
-        # Flip: t=0 at top (y=n_nodes), t=t_span at bottom (y=0)
-        ys = [n_nodes - t * n_nodes for t in ts]
+        # RAM: filled area (allocated = light, used = red)
+        ax_usage.fill_between(ts_px,
+                              [v / max_alloc * 100 for v in alloc_ram],
+                              alpha=0.25, color='#d0cec8',
+                              step='post', label=f'RAM allocated (peak {max_alloc:.0f} GB)')
+        ax_usage.fill_between(ts_px,
+                              [v / max_alloc * 100 for v in used_ram],
+                              alpha=0.65, color='#A32D2D',
+                              step='post', label='RAM used')
+        ax_usage.set_ylabel('RAM / alloc %', fontfamily=FONT,
+                            fontsize=8, color='#A32D2D')
+        ax_usage.set_ylim(0, 110)
+        ax_usage.tick_params(axis='y', labelsize=7, colors='#A32D2D')
 
-        # Allocated RAM as thin background bar (full width = max alloc)
-        max_alloc = max(alloc_ram) if alloc_ram else 1
-        alloc_xs  = [v / max_alloc for v in alloc_ram]
-        used_xs   = [v / max_alloc for v in used_ram]
+        # CPU: line on twin y-axis
+        ax_cpu2 = ax_usage.twinx()
+        ax_cpu2.step(ts_px, [v / max_cpu * 100 for v in used_cpu],
+                     color='#185FA5', linewidth=1.4, where='post',
+                     label=f'CPU used (peak {max_cpu:.0f} vCPU)')
+        ax_cpu2.set_ylabel('CPU / peak %', fontfamily=FONT,
+                           fontsize=8, color='#185FA5')
+        ax_cpu2.set_ylim(0, 110)
+        ax_cpu2.tick_params(axis='y', labelsize=7, colors='#185FA5')
 
-        # Draw as horizontal bands (barh) — each sample is one thin bar
-        bar_h = (ys[0] - ys[1]) * 0.85 if len(ys) > 1 else 0.5
-
-        for i, (y_pos, ax_f, ux_f) in enumerate(zip(ys, alloc_xs, used_xs)):
-            ax_usage.barh(y_pos, ax_f, bar_h,
-                          color='#d0cec8', zorder=2)
-            ax_usage.barh(y_pos, ux_f, bar_h,
-                          color='#A32D2D', alpha=0.75, zorder=3)
-
-        # CPU as a thin line on a secondary x-axis
-        ax_cpu = ax_usage.twiny()
-        max_cpu = max(used_cpu) if used_cpu else 1
-        ax_cpu.step([v / max_cpu for v in used_cpu], ys,
-                    color='#185FA5', linewidth=1.2, where='post', alpha=0.85)
-        ax_cpu.set_xlim(0, 1.05)
-        ax_cpu.set_xlabel('CPU (frac of peak)', fontsize=7,
-                          fontfamily=FONT, color='#185FA5')
-        ax_cpu.tick_params(axis='x', labelsize=6, colors='#185FA5')
-
-        ax_usage.set_xlim(0, 1.05)
-        ax_usage.set_ylim(-0.8, n_nodes - 0.2)
-        ax_usage.set_xlabel('RAM (frac of peak alloc)', fontsize=7, fontfamily=FONT)
-        ax_usage.tick_params(axis='x', labelsize=6)
-        ax_usage.set_yticks([])
+        # Combined legend
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+        handles = [
+            Patch(color='#d0cec8', alpha=0.5,
+                  label=f'RAM allocated  (peak {max_alloc:.0f} GB)'),
+            Patch(color='#A32D2D', alpha=0.65, label='RAM used'),
+            Line2D([0],[0], color='#185FA5', lw=1.4,
+                   label=f'CPU used  (peak {max_cpu:.0f} vCPU)'),
+        ]
+        ax_usage.legend(handles=handles, fontsize=7, loc='upper right',
+                        framealpha=0.9)
         ax_usage.set_facecolor('#fafaf9')
         ax_usage.grid(True, axis='x', alpha=0.15)
 
-        # Peak labels
-        ax_usage.text(0.98, 0.01,
-                      f'RAM peak: {max_alloc:.0f} GB  CPU peak: {max_cpu:.0f} vCPU',
-                      transform=ax_usage.transAxes,
-                      fontsize=6.5, fontfamily=FONT, ha='right', va='bottom',
-                      color='#555')
+    # Shared x-axis ticks (on bottom panel)
+    tick_s = _nice_tick_seconds(t_span)
+    ticks  = np.arange(0, t_span + tick_s, tick_s)
+    ax_usage.set_xticks(ticks * t_scale)
+    ax_usage.set_xticklabels(
+        [f'{t/60:.0f}m' for t in ticks], fontsize=8, fontfamily=FONT)
+    ax_usage.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
 
-        # Legend patches
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
-        ax_usage.legend(handles=[
-            Patch(color='#d0cec8', label='RAM allocated'),
-            Patch(color='#A32D2D', alpha=0.75, label='RAM used'),
-            Line2D([0],[0], color='#185FA5', lw=1.2, label='CPU used'),
-        ], fontsize=6.5, loc='upper right', framealpha=0.9)
-
-        ax_usage.set_title('CPU / RAM over time',
-                           fontfamily=FONT, fontsize=8, loc='left')
-
-    plt.tight_layout()
+    fig.align_ylabels([ax_usage])
     for ext in ('png', 'svg'):
         fig.savefig(out / f'overview.{ext}', dpi=130, bbox_inches='tight')
     plt.close(fig)
@@ -490,7 +511,7 @@ def chart_overview(
 
 
 # ---------------------------------------------------------------------------
-# Per-node detail chart — Gantt (left) + usage bars (right)
+# Per-node detail chart — Gantt (top) + CPU/RAM usage (bottom), shared time axis
 # ---------------------------------------------------------------------------
 
 def chart_per_node(
@@ -499,6 +520,12 @@ def chart_per_node(
     out: Path,
     scheduler_type: str = 'batch',
 ) -> None:
+    """
+    Per-node detail chart.
+    Layout: Gantt (top, one row per job + node row) stacked above
+            CPU/RAM usage (bottom), both with time on the horizontal axis.
+    Left labels show: centroid, job_id prefix, soft/hard CPU, RAM reservation.
+    """
     jobs = node['jobs']
     if not jobs:
         return
@@ -511,25 +538,30 @@ def chart_per_node(
 
     n_rows  = len(jobs) + 1
     row_h   = 0.7
-    fig_h   = max(3, n_rows * row_h * 1.8 + 1.5)
+    gantt_h = max(2.5, n_rows * row_h * 1.8 + 1.0)
+    usage_h = 2.2
+    fig_w   = 15
 
-    fig = plt.figure(figsize=(15, fig_h))
-    gs  = fig.add_gridspec(1, 2, width_ratios=[7, 3], wspace=0.06)
+    fig = plt.figure(figsize=(fig_w, gantt_h + usage_h + 0.6))
+    gs  = fig.add_gridspec(2, 1, height_ratios=[gantt_h, usage_h],
+                            hspace=0.06)
     ax_gantt = fig.add_subplot(gs[0])
-    ax_usage = fig.add_subplot(gs[1])
+    ax_usage = fig.add_subplot(gs[1], sharex=ax_gantt)
 
-    gantt_w = 10
-    t_scale = gantt_w / t_span
+    t_scale = (fig_w - 2.5) / t_span
 
-    # Node lifecycle row
+    # ── Node lifecycle row (top row in gantt) ─────────────────────────
     _draw_node_row(ax_gantt, node, n_rows - 1, row_h,
-                   t_min, t_scale, gantt_w, scheduler_type=scheduler_type)
-    ax_gantt.text(-0.01, n_rows - 1, 'node',
+                   t_min, t_scale, fig_w, scheduler_type=scheduler_type)
+    soft = node.get('soft_cpu', '?')
+    hard = node.get('hard_cpu', '?')
+    ax_gantt.text(-0.005, n_rows - 1,
+                  f"node  {node['instance']}  cpu:{soft}/{hard}  {node['ram_gb']:.0f}GB",
                   transform=ax_gantt.get_yaxis_transform(),
                   ha='right', va='center', fontsize=8,
                   fontfamily=FONT, fontweight='bold')
 
-    # Per-job rows with reservation tick
+    # ── Per-job rows ──────────────────────────────────────────────────
     for i, job in enumerate(jobs):
         y     = i
         hatch = CENTROID_HATCH.get(job['centroid'], '')
@@ -542,21 +574,21 @@ def chart_per_node(
                 color=PHASE_COLOR.get(ph, '#aaa'),
                 hatch=hatch, edgecolor='white', linewidth=0.4, zorder=3,
             )
-            if (t1 - t0) * t_scale > 20:
+            if (t1 - t0) * t_scale > 22:
                 ax_gantt.text(
                     (t0 - t_min + (t1 - t0) / 2) * t_scale, y,
                     ph[:4], ha='center', va='center',
                     fontsize=7, color='white', fontfamily=FONT, zorder=4,
                 )
 
-        # Reservation tick at right edge
+        # Reservation tick: vertical line at right edge with RAM label
         res_gb = job.get('reserved_ram_gb')
         if res_gb is not None:
             tick_x = (job['end_t'] - t_min) * t_scale
             ax_gantt.plot([tick_x, tick_x],
                           [y - row_h * 0.45, y + row_h * 0.45],
                           color='#222', linewidth=1.4, zorder=6)
-            ax_gantt.text(tick_x + 0.08, y,
+            ax_gantt.text(tick_x + 0.06, y,
                           f'{res_gb:.0f}G',
                           fontsize=6.5, va='center', color='#222',
                           fontfamily=FONT, zorder=7)
@@ -567,88 +599,94 @@ def chart_per_node(
                 'x', color='#e74c3c', markersize=7, mew=2, zorder=5,
             )
 
-        label = f"{job['centroid'].split('_')[-1].upper()}  {job['job_id'][:8]}"
-        ax_gantt.text(-0.01, y, label,
+        # Left label: centroid  job_id  soft/hard CPU  RAM reservation
+        res_str = f'  ram:{res_gb:.0f}G' if res_gb is not None else ''
+        job_soft = job.get('soft_cpu', '?')
+        job_hard = job.get('hard_cpu', '?')
+        label = (f"{job['centroid'].split('_')[-1].upper()}"
+                 f"  {job['job_id'][:8]}"
+                 f"  cpu:{job_soft}/{job_hard}{res_str}")
+        ax_gantt.text(-0.005, y, label,
                       transform=ax_gantt.get_yaxis_transform(),
-                      ha='right', va='center', fontsize=7.5, fontfamily=FONT)
+                      ha='right', va='center', fontsize=7, fontfamily=FONT)
 
-    tick_s = _nice_tick_seconds(t_span)
-    ticks  = np.arange(0, t_span + tick_s, tick_s)
-    ax_gantt.set_xticks(ticks * t_scale)
-    ax_gantt.set_xticklabels(
-        [f'{t:.0f}s' if t_span < 600 else f'{t/60:.1f}m' for t in ticks],
-        fontsize=8, fontfamily=FONT,
-    )
-    ax_gantt.set_xlim(0, t_span * t_scale)
     ax_gantt.set_ylim(-0.6, n_rows - 0.4)
     ax_gantt.set_yticks([])
-    ax_gantt.set_xlabel('time since node launch', fontfamily=FONT, fontsize=9)
+    ax_gantt.set_xlim(0, t_span * t_scale)
+    ax_gantt.tick_params(axis='x', labelbottom=False)
     ax_gantt.set_title(
-        f'Node {node_id}  —  {node["instance"]}  '
-        f'({node["ram_gb"]:.0f} GB  ${node["hourly_usd"]:.4f}/hr)\n'
-        f'lifespan {t_span:.0f}s  ·  {len(jobs)} jobs  ·  cost ${node["cost"]:.4f}',
-        fontfamily=FONT, fontsize=10,
+        f'Node {node_id}  —  {node["instance"]}'
+        f'  ({node["ram_gb"]:.0f} GB  ${node["hourly_usd"]:.4f}/hr)'
+        f'  lifespan {t_span:.0f}s  ·  {len(jobs)} jobs  ·  ${node["cost"]:.4f}'
+        f'  (left labels: centroid  job_id  cpu:soft/hard  ram:limit)',
+        fontfamily=FONT, fontsize=9,
     )
     ax_gantt.legend(handles=_legend_handles(), fontsize=8,
                     loc='upper right', ncol=2, framealpha=0.9)
     ax_gantt.grid(True, axis='x', alpha=0.18, zorder=1)
     ax_gantt.set_facecolor('#fafaf9')
 
-    # ── Right: per-node CPU/RAM usage bars ─────────────────────────────
-    # Build phase segments for this node only
+    # ── Bottom panel: CPU/RAM over time ──────────────────────────────
     node_tl = {node_id: node}
     series  = _build_usage_series(node_tl, sample_s=max(10, t_span / 60))
 
     if series:
-        ts        = [s['t'] / t_span for s in series]
-        used_ram  = [s['used_ram']   for s in series]
-        alloc_ram = [s['alloc_ram']  for s in series]
-        used_cpu  = [s['used_vcpu']  for s in series]
-        node_ram  = node['ram_gb']
+        ts_px    = [s['t'] * t_scale for s in series]
+        used_ram = [s['used_ram']    for s in series]
+        alloc_ram= [s['alloc_ram']   for s in series]
+        used_cpu = [s['used_vcpu']   for s in series]
+        node_ram = node['ram_gb']
+        max_cpu  = max(used_cpu) if any(used_cpu) else 1
 
-        # y positions — map time to job row positions (top to bottom)
-        ys    = [(1 - t) * n_rows for t in ts]
-        bar_h = (ys[0] - ys[1]) * 0.85 if len(ys) > 1 else 0.4
+        ax_usage.fill_between(ts_px,
+                              [v / node_ram * 100 for v in alloc_ram],
+                              alpha=0.25, color='#d0cec8',
+                              step='post', label=f'RAM allocated ({node_ram:.0f} GB)')
+        ax_usage.fill_between(ts_px,
+                              [v / node_ram * 100 for v in used_ram],
+                              alpha=0.65, color='#A32D2D',
+                              step='post', label='RAM used')
+        ax_usage.set_ylabel('RAM / node %', fontfamily=FONT,
+                            fontsize=8, color='#A32D2D')
+        ax_usage.set_ylim(0, 110)
+        ax_usage.tick_params(axis='y', labelsize=7, colors='#A32D2D')
 
-        for y_pos, ar, ur in zip(ys, alloc_ram, used_ram):
-            ax_usage.barh(y_pos, ar / node_ram, bar_h,
-                          color='#d0cec8', zorder=2)
-            ax_usage.barh(y_pos, ur / node_ram, bar_h,
-                          color='#A32D2D', alpha=0.75, zorder=3)
-
-        ax_cpu = ax_usage.twiny()
-        max_cpu = max(used_cpu) if any(used_cpu) else 1
-        ax_cpu.step([v / max(max_cpu, 1) for v in used_cpu], ys,
-                    color='#185FA5', linewidth=1.2, where='post', alpha=0.85)
-        ax_cpu.set_xlim(0, 1.05)
-        ax_cpu.set_xlabel('CPU (frac of peak)', fontsize=7,
-                          fontfamily=FONT, color='#185FA5')
-        ax_cpu.tick_params(axis='x', labelsize=6, colors='#185FA5')
-
-        ax_usage.set_xlim(0, 1.05)
-        ax_usage.set_ylim(-0.6, n_rows - 0.4)
-        ax_usage.set_xlabel(f'RAM (frac of {node_ram:.0f} GB)',
-                            fontsize=7, fontfamily=FONT)
-        ax_usage.tick_params(axis='x', labelsize=6)
-        ax_usage.set_yticks([])
-        ax_usage.set_facecolor('#fafaf9')
-        ax_usage.grid(True, axis='x', alpha=0.18)
-        ax_usage.set_title('CPU / RAM over time',
-                           fontfamily=FONT, fontsize=8, loc='left')
+        ax_cpu2 = ax_usage.twinx()
+        ax_cpu2.step(ts_px, [v / max_cpu * 100 for v in used_cpu],
+                     color='#185FA5', linewidth=1.4, where='post',
+                     label=f'CPU used (peak {max_cpu:.1f} vCPU)')
+        ax_cpu2.set_ylabel('CPU / peak %', fontfamily=FONT,
+                           fontsize=8, color='#185FA5')
+        ax_cpu2.set_ylim(0, 110)
+        ax_cpu2.tick_params(axis='y', labelsize=7, colors='#185FA5')
 
         from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
-        ax_usage.legend(handles=[
-            Patch(color='#d0cec8', label='RAM allocated'),
-            Patch(color='#A32D2D', alpha=0.75, label='RAM used'),
-            Line2D([0],[0], color='#185FA5', lw=1.2, label='CPU used'),
-        ], fontsize=6.5, loc='upper right', framealpha=0.9)
+        handles = [
+            Patch(color='#d0cec8', alpha=0.5,
+                  label=f'RAM allocated  ({node_ram:.0f} GB)'),
+            Patch(color='#A32D2D', alpha=0.65, label='RAM used'),
+            Line2D([0],[0], color='#185FA5', lw=1.4,
+                   label=f'CPU used  (peak {max_cpu:.1f} vCPU)'),
+        ]
+        ax_usage.legend(handles=handles, fontsize=7, loc='upper right',
+                        framealpha=0.9)
+        ax_usage.set_facecolor('#fafaf9')
+        ax_usage.grid(True, axis='x', alpha=0.18)
 
-    plt.tight_layout()
-    fname = f'node_{node_id}'
+    tick_s = _nice_tick_seconds(t_span)
+    ticks  = np.arange(0, t_span + tick_s, tick_s)
+    ax_usage.set_xticks(ticks * t_scale)
+    ax_usage.set_xticklabels(
+        [f'{t:.0f}s' if t_span < 600 else f'{t/60:.1f}m' for t in ticks],
+        fontsize=8, fontfamily=FONT,
+    )
+    ax_usage.set_xlabel('time since node launch', fontfamily=FONT, fontsize=9)
+
     for ext in ('png', 'svg'):
-        fig.savefig(out / f'{fname}.{ext}', dpi=130, bbox_inches='tight')
+        fig.savefig(out / f'node_{node_id}.{ext}', dpi=130, bbox_inches='tight')
     plt.close(fig)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
