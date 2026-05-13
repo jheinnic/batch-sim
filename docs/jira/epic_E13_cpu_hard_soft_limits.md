@@ -108,11 +108,23 @@ The solver uses the job's current workhorse stage io_wait if in the
 workhorse phase, else 0 (download/upload/preprocess are modelled as
 single-threaded or network-bound, not CPU-competing).
 
-**Note on phase opacity:**
-The OS and K8S schedulers have no concept of phases. The scheduler
-sees one soft_cpu and one hard_cpu for the job's entire lifetime.
-The per-stage io_wait is simulation metadata only; the solver uses
-the current stage's io_wait as the best available approximation.
+**Why Option 2 is correct, not merely conservative:**
+The hard_cpu limit is declared at the maximum any stage will demand
+(the thread count of the most parallel stage), enforced statically by
+the kernel for the container's lifetime. The OS and K8S schedulers have
+no concept of phases — this is a simulation construct only.
+
+A job returning cycles in a low-demand phase has not relinquished its
+entitlement. Redistributing those returned cycles to another job's boost
+would set the kernel up for starvation: when the returning job advances
+to its most demanding stage simultaneously with the boosted job, both
+claim their full hard limit with no headroom to honour either.
+
+Option 2 prevents this by withholding returned cycles from redistribution
+— exactly as cgroup cpu.cfs_quota_us enforcement behaves in practice.
+The wasted cycles are the correct accounting of capacity reserved against
+future stage demands. K8S+ advantage under Option 2 is a lower bound on
+real-world gain, strengthening rather than weakening the pro-K8S case.
 
 **Acceptance Criteria:**
 - Unit test: A(soft=4,hard=12,io=0.5), B(soft=4,hard=12,io=0.0)
