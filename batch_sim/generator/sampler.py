@@ -75,4 +75,16 @@ def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps:
         network_bandwidth_mbps=network_bandwidth_mbps,
         io_wait_fractions=io_wait_fractions,
     )
-    return JobSpec(centroid_id=centroid.id, profile=profile)
+    # BSIM-69: derive job-level soft/hard CPU limits from per-stage arrays
+    if centroid.workhorse_soft_vcpu is not None:
+        soft_cpu = max(centroid.workhorse_soft_vcpu)
+    else:
+        soft_cpu = profile.workhorse_declared_vcpu
+
+    if centroid.workhorse_hard_vcpu is not None:
+        hard_cpu = max(centroid.workhorse_hard_vcpu)
+    else:
+        hard_cpu = soft_cpu   # no burst: Batch behaviour
+
+    return JobSpec(centroid_id=centroid.id, profile=profile,
+                   soft_cpu=soft_cpu, hard_cpu=hard_cpu)

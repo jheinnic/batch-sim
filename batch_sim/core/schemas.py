@@ -23,6 +23,25 @@ class CentroidConfig(BaseModel):
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
     workhorse_thread_counts: list[PositiveInt]
     io_wait_fraction: Fraction
+    workhorse_soft_vcpu: list[int] | None = Field(
+        default=None,
+        description=(
+            "Optional per-parallel-stage minimum vCPU guarantee. "
+            "Scheduler reserves max(workhorse_soft_vcpu) per job. "
+            "When absent, max(workhorse_thread_counts) is used (current behaviour)."
+        )
+    )
+    workhorse_hard_vcpu: list[int] | None = Field(
+        default=None,
+        description=(
+            "Optional per-parallel-stage CPU burst ceiling. "
+            "Equals thread count for that stage — the point beyond which "
+            "adding vCPU yields no throughput gain. "
+            "Scheduler allows job to burst to max(workhorse_hard_vcpu) "
+            "when surplus cycles are available. "
+            "When absent, hard == soft (no burst, Batch behaviour)."
+        )
+    )
     burst_size_min: int = Field(
         default=1, ge=1,
         description="Minimum jobs per burst arrival event. "
@@ -80,6 +99,22 @@ class CentroidConfig(BaseModel):
                 f"burst_size_min ({self.burst_size_min}) must be "
                 f"<= burst_size_max ({self.burst_size_max})"
             )
+        for arr_name, arr in [("workhorse_soft_vcpu", self.workhorse_soft_vcpu),
+                               ("workhorse_hard_vcpu", self.workhorse_hard_vcpu)]:
+            if arr is not None and len(arr) != expected:
+                raise ValueError(
+                    f"{arr_name} must have {expected} entries "
+                    f"(one per parallel stage); got {len(arr)}"
+                )
+        if (self.workhorse_soft_vcpu is not None and
+                self.workhorse_hard_vcpu is not None):
+            for i, (s, h) in enumerate(
+                    zip(self.workhorse_soft_vcpu, self.workhorse_hard_vcpu)):
+                if s > h:
+                    raise ValueError(
+                        f"workhorse_soft_vcpu[{i}]={s} > "
+                        f"workhorse_hard_vcpu[{i}]={h}"
+                    )
         return self
 
 

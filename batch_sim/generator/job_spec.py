@@ -50,6 +50,11 @@ class JobSpec:
     centroid_id: str = ""
     profile: PhaseProfile = field(default_factory=PhaseProfile)
     retry_count: int = 0
+    # BSIM-69: K8S hard/soft CPU limits
+    # soft_cpu: scheduler reservation (placement signal)
+    # hard_cpu: burst ceiling (thread count of busiest parallel stage)
+    soft_cpu: int = 0   # 0 = use profile.workhorse_declared_vcpu
+    hard_cpu: int = 0   # 0 = no burst (equals soft_cpu)
 
     def fresh_copy(self) -> "JobSpec":
         import copy
