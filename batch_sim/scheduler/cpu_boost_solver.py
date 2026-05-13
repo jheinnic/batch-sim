@@ -4,18 +4,37 @@ BSIM-70: CPU boost solver — Option 2 greedy allocator.
 Distributes surplus vCPU cycles to jobs on a node beyond their soft_cpu
 reservation, up to their hard_cpu ceiling.
 
-Option 2 semantics (conservative, physically honest):
+Option 2 semantics (correct, not merely conservative):
   - Jobs are sorted by io_wait ascending (lowest io_wait first)
   - Each job absorbs surplus up to its hard_cpu headroom
   - Cycles returned by a job's I/O wait are NOT redistributed
-    (the job already had its opportunity to use them and didn't)
   - Any surplus remaining after all jobs are satisfied or at hard_cpu
-    is permanently wasted
+    is permanently wasted for the current scheduling interval
 
-This is the more conservative model: it assumes the OS/K8S schedulers
-cannot predict future phase behaviour, so returned cycles are lost.
-Under this assumption, K8S+ wins over Batch when surplus exists AND
-the advantage is more credible (worst-case, not best-case).
+Why Option 2 is physically correct, not merely pessimistic:
+
+  The hard_cpu limit is declared at the maximum any stage of the
+  container will demand — specifically, the thread count of the most
+  parallel stage. The kernel enforces this limit statically for the
+  container's lifetime because the OS has no concept of phases.
+
+  A job that returns cycles in one stage is not relinquishing its
+  entitlement — it is in a phase where it cannot use what it is entitled
+  to. Its entitlement remains declared at the hard limit.
+
+  Redistributing those returned cycles to another job's boost allocation
+  would set the kernel up for CPU starvation: if the first job's next
+  stage arrives at its maximum threading capacity simultaneously with the
+  boosted job's demand, the kernel faces two jobs claiming their full
+  hard limit with no headroom to honour both. Option 2 prevents this by
+  withholding returned cycles from redistribution — exactly as the kernel
+  correctly does to guarantee the declared hard limit is always satisfiable
+  on arrival at a demanding stage.
+
+  The wasted cycles are therefore not a modelling pessimism but the correct
+  accounting of capacity the kernel withholds to protect future stage demands.
+  Under this correct model, any K8S+ advantage over Batch is a lower bound
+  on the real-world gain, not an upper bound.
 
 The solver is called at every discrete event:
   - Job placed on node
