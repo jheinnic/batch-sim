@@ -5,7 +5,8 @@ from typing import TypeVar, Type
 import yaml
 from pydantic import BaseModel
 from batch_sim.core.schemas import (
-    SimulationConfig, InstanceRegistryConfig, SchedulerConfig, ExperimentConfig,
+    SimulationConfig, InstanceRegistryConfig, SchedulerConfig,
+    K8SPlusSchedulerConfig, ExperimentConfig,
 )
 
 M = TypeVar("M", bound=BaseModel)
@@ -26,8 +27,11 @@ def load_simulation_config(path: str | Path) -> SimulationConfig:
 def load_instance_registry_config(path: str | Path) -> InstanceRegistryConfig:
     return load_config(path, InstanceRegistryConfig)
 
-def load_scheduler_config(path: str | Path) -> SchedulerConfig:
-    return load_config(path, SchedulerConfig)
+def load_scheduler_config(path: str | Path) -> SchedulerConfig | K8SPlusSchedulerConfig:
+    raw = _load_yaml(path)
+    if raw.get("scheduler_type") == "k8splus":
+        return K8SPlusSchedulerConfig.model_validate(raw)
+    return SchedulerConfig.model_validate(raw)
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
     return load_config(path, ExperimentConfig)
