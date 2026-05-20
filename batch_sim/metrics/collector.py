@@ -20,9 +20,11 @@ class EventType(str, Enum):
     NODE_LAUNCHING   = "node_launching"
     NODE_READY       = "node_ready"
     NODE_IDLE        = "node_idle"
+    NODE_DRAINING    = "node_draining"    # BSIM-85: node accepted no new jobs
     NODE_TERMINATED  = "node_terminated"
     COST_SAMPLE      = "cost_sample"
     CPU_WASTE        = "cpu_waste"     # BSIM-71: wasted vCPU-seconds per node
+    POLICY_SWAP      = "policy_swap"   # BSIM-84: time-window boundary crossed
 
 
 class PhaseID(str, Enum):
@@ -37,6 +39,7 @@ class NodeState(str, Enum):
     LAUNCHING  = "launching"
     READY      = "ready"
     IDLE       = "idle"
+    DRAINING   = "draining"    # BSIM-85: no new placements, finishes current jobs
     TERMINATED = "terminated"
 
 
@@ -88,5 +91,15 @@ class MetricsCollector:
         self.record(SimEvent(EventType.NODE_READY, t, {"node_id": node_id, "instance_name": instance_name}))
     def node_idle(self, t, node_id):
         self.record(SimEvent(EventType.NODE_IDLE, t, {"node_id": node_id}))
+    def node_draining(self, t, node_id, drain_rule_idle_vcpu=None):
+        self.record(SimEvent(EventType.NODE_DRAINING, t, {
+            "node_id": node_id,
+            **({"drain_rule_idle_vcpu": drain_rule_idle_vcpu} if drain_rule_idle_vcpu is not None else {})
+        }))
     def node_terminated(self, t, node_id, idle_duration_s):
         self.record(SimEvent(EventType.NODE_TERMINATED, t, {"node_id": node_id, "idle_duration_s": idle_duration_s}))
+    def policy_swap(self, t, old_start_s, new_start_s):
+        self.record(SimEvent(EventType.POLICY_SWAP, t, {
+            "old_window_start_s": old_start_s,
+            "new_window_start_s": new_start_s,
+        }))
