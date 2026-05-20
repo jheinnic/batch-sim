@@ -23,6 +23,7 @@ class RunningJobSlot:
     phase_peak_ram_gb: float
     effective_vcpu: float
     soft_limit_ram_gb: float = 0.0   # BSIM-61: steady-state cap for Util3
+    cpu_change_event: object = None  # set by stage loop; fired by cpu_boost writeback
 
 
 class NodeModel:
@@ -154,7 +155,25 @@ def run_job_process(env, job, node, metrics, overload_handler, arrival_time, que
         node.update_phase(job_id, PhaseID.WORKHORSE, ram_gb=p.workhorse_ram_gb,
                           vcpu=stage.effective_threads)
         scheduler.cpu_boost(env, node, metrics)
-        yield env.timeout(stage.wall_clock_seconds)
+        # Dynamic stage timing: cpu_boost writes slot.effective_vcpu each time
+        # any job on the node changes state.  We consume stage.cpu_seconds of
+        # work at that rate, restarting the timer whenever the allocation changes.
+        # Cap at the stage thread ceiling so extra CPU beyond declared threads
+        # cannot speed a stage past its physical parallelism limit.
+        stage_cap = max(stage.effective_threads, 1e-6)
+        remaining_cpu_s = stage.cpu_seconds
+        while remaining_cpu_s > 1e-9:
+            slot = node._slots.get(job_id)
+            if slot is None or _evicted():
+                node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
+            current_vcpu = min(max(slot.effective_vcpu, 1e-6), stage_cap)
+            cpu_evt = env.event()
+            slot.cpu_change_event = cpu_evt
+            stage_t0 = env.now
+            yield env.timeout(remaining_cpu_s / current_vcpu) | cpu_evt
+            elapsed = env.now - stage_t0
+            remaining_cpu_s = max(0.0, remaining_cpu_s - elapsed * current_vcpu)
+            slot.cpu_change_event = None
         if _evicted():
             node.remove_job(job_id); scheduler.on_job_complete(env, node, job); return
 

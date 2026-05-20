@@ -91,6 +91,16 @@ def run_cpu_boost_k8s(
         ))
 
     result = solve_cpu_boost(jobs_state, int(node.physical_vcpu))
+
+    # Write effective_vcpu back into each slot so the dynamic stage timer can
+    # read the new allocation, then fire the cpu_change_event to wake the timer.
+    for slot, js in zip(slots, result.jobs):
+        slot.effective_vcpu = js.effective_vcpu
+        evt = slot.cpu_change_event
+        if evt is not None and not evt.triggered:
+            slot.cpu_change_event = None
+            evt.succeed()
+
     _emit_cpu_waste(env, node, result, metrics, scheduler_type)
 
 
@@ -164,6 +174,14 @@ def run_cpu_boost_batch(
 
     thread_waste_total = sum(j.thread_waste for j in jobs)
     effective_total    = sum(j.effective_vcpu for j in jobs)
+
+    # Write effective_vcpu back into each slot and wake the dynamic stage timer.
+    for slot, bj in zip(slots, jobs):
+        slot.effective_vcpu = bj.effective_vcpu
+        evt = slot.cpu_change_event
+        if evt is not None and not evt.triggered:
+            slot.cpu_change_event = None
+            evt.succeed()
 
     # Batch has no io_ineligible_waste (CFS redistributes implicitly)
     # and no hard_limit_waste (no quota ceiling)
