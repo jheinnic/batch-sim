@@ -1,4 +1,3 @@
-"""BSIM-37/38/39: Experiment runner — panic threshold sweep, Pareto frontier, meta-effect."""
 from __future__ import annotations
 import json, random
 from pathlib import Path
@@ -20,14 +19,19 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
     If return_metrics=True, returns (Scorecard, MetricsCollector) instead.
     """
     metrics = MetricsCollector(); rng = random.Random(seed)
-    if scheduler_type == SchedulerType.BATCH:
+    if (scheduler_type == SchedulerType.BATCH):
         from batch_sim.scheduler.batch_scheduler import BatchScheduler
         scheduler = BatchScheduler(cfg=cfg, registry=registry, metrics=metrics, rng=rng)
-    else:
+    elif (scheduler_type == SchedulerType.K8S):
         centroid_peak_rams = list({e.preprocess_peak_ram_gb for e in event_list.events})
         from batch_sim.scheduler.k8s_scheduler import K8SScheduler
         scheduler = K8SScheduler(cfg=cfg, registry=registry, metrics=metrics,
-                                  centroid_peak_rams=centroid_peak_rams, rng=rng)
+                                 centroid_peak_rams=centroid_peak_rams, rng=rng)
+    elif (scheduler_type == SchedulerType.K8SPLUS):
+        centroid_peak_rams = list({e.preprocess_peak_ram_gb for e in event_list.events})
+        from batch_sim.scheduler.k8s_plus_scheduler import K8SPlusScheduler
+        scheduler = K8SPlusScheduler(cfg=cfg, registry=registry, metrics=metrics,
+                                 centroid_peak_rams=centroid_peak_rams, rng=rng)
     engine = SimulationEngine(scheduler=scheduler, metrics=metrics, cfg=cfg)
     cooloff = event_list.metadata.get("cooloff_seconds", 0.0)
     engine.run(event_list, cooloff_seconds=cooloff)
@@ -44,7 +48,7 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
 
 def run_experiment(event_list_path, panic_threshold_values, base_cfg, registry,
                    output_dir, schedulers=None, seed=42):
-    if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S]
+    if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S, SchedulerType.K8SPlus]
     output_dir = Path(output_dir); event_list = load_event_list(event_list_path)
     collated = []
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),

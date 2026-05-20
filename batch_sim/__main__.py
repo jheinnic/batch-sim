@@ -34,7 +34,7 @@ def generate(config, output, seed):
 
 @cli.command()
 @click.option("--events", required=True, type=click.Path(exists=True))
-@click.option("--scheduler", required=True, type=click.Choice(["batch", "k8s"]))
+@click.option("--scheduler", required=True, type=click.Choice(["batch", "k8s", "k8splus"]))
 @click.option("--scheduler-config", required=True, type=click.Path(exists=True))
 @click.option("--registry", default="configs/instance_registry.yaml", type=click.Path(exists=True))
 @click.option("--output", required=True, type=click.Path())

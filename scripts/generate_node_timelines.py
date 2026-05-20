@@ -483,7 +483,7 @@ def chart_overview(
     ax_gantt.legend(handles=_legend_handles(), fontsize=7,
                     loc='upper right', ncol=3, framealpha=0.9)
 
-    sched_label = 'AWS Batch' if scheduler_type == 'batch' else 'OKD K8S+'
+    sched_label = 'AWS Batch' if scheduler_type == 'batch' else 'OKD K8S' if scheduler_type == 'k8s' else 'OKD K8S+'
     ax_gantt.set_title(
         f'{sched_label} — Node Lifecycles  '
         f'{n_nodes} nodes · {metadata["total_jobs"]} jobs · '
@@ -766,7 +766,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Generate per-node job timeline charts for a scheduler run.'
     )
-    parser.add_argument('--scheduler', choices=['batch', 'k8s'], required=True)
+    parser.add_argument('--scheduler', choices=['batch', 'k8s', 'k8splus'], required=True)
     parser.add_argument('--events',
                         default='workloads/reference_4h_v1.json',
                         help='Path to event list JSON')
