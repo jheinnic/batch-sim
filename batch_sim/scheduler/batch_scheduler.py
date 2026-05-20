@@ -52,6 +52,33 @@ class BatchScheduler:
         instance = self.registry.cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         if instance: env.process(self._launch_node(env, instance, for_job=job))
 
+    def _maybe_provision_more(self, env) -> None:
+        """
+        Progressive scale-out: if unplaceable jobs remain AND no node is currently
+        launching, launch one more node for the highest-priority queued job.
+
+        This models real AWS Batch behaviour — the compute environment scales out
+        to run queued jobs in parallel rather than serialising them on one node.
+        Called at the end of _try_schedule so each node-ready event can trigger
+        the next launch in a controlled, one-at-a-time cascade.
+        """
+        if not self._queue:
+            return
+        # If a node is already on the way, wait for it before launching another.
+        if any(n.state == NodeStateEnum.LAUNCHING for n in self._nodes.values()):
+            return
+        entry = sorted(self._queue._heap)[0]   # highest-priority unplaced job
+        job = entry.job; p = job.profile
+        _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
+        # Only launch if no READY node has available capacity for this job right now.
+        if any(n.state == NodeStateEnum.READY
+               and self._batch_fits(n, p.peak_ram_gb, _vcpu)
+               for n in self._nodes.values()):
+            return   # a READY node can already serve this job
+        instance = self.registry.cheapest_fitting(p.peak_ram_gb, _vcpu)
+        if instance:
+            env.process(self._launch_node(env, instance))   # no reservation — any job can use it
+
     def _try_schedule(self, env):
         """Scan full queue for placeable jobs; do not stop at first unplaceable
         entry (avoids deadlock when a warming node is reserved for a later job
@@ -67,6 +94,7 @@ class BatchScheduler:
                     heapq.heapify(self._queue._heap)
                     changed = True
                     break
+        self._maybe_provision_more(env)
 
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile

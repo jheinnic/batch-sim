@@ -175,6 +175,11 @@ class K8SScheduler:
         proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
         self._panic_monitors[job.job_id] = proc
         self._try_schedule(env)
+        # Proactive provisioning: launch immediately if the cluster has no active capacity.
+        # Prevents a cold cluster from waiting the full panic_threshold before any job runs.
+        if not any(n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
+                   for n in self._nodes.values()):
+            self.guarantee_capacity(env, job)
 
     def on_job_complete(self, env, node, job):
         soft = job.profile.soft_limit_ram_gb
