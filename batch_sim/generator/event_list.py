@@ -17,6 +17,32 @@ from batch_sim.generator.sampler import sample_job
 class ArrivalRecord:
     arrival_time: float
     centroid_id: str
+    bin_weights_override: list[float] | None = None  # BSIM-77: active window weights
+
+
+def _active_window(centroid, t):
+    """Return the TimeWindowOverride covering time t, or None."""
+    if not centroid.time_windows:
+        return None
+    for w in centroid.time_windows:
+        if w.start_time_s <= t < w.end_time_s:
+            return w
+    return None
+
+
+def _window_boundary(centroid, t, horizon_seconds):
+    """
+    Return the time at which the current rate context ends — either the end of
+    the active window, the start of the next window, or horizon_seconds.
+    """
+    if not centroid.time_windows:
+        return horizon_seconds
+    for w in centroid.time_windows:
+        if w.start_time_s <= t < w.end_time_s:
+            return min(w.end_time_s, horizon_seconds)
+    # t is in a gap; advance to the nearest upcoming window boundary
+    upcoming = [w.start_time_s for w in centroid.time_windows if w.start_time_s > t]
+    return min(min(upcoming), horizon_seconds) if upcoming else horizon_seconds
 
 
 def generate_arrivals(centroids, horizon_seconds, rng):
@@ -24,27 +50,54 @@ def generate_arrivals(centroids, horizon_seconds, rng):
     Generate arrival records for all centroids.
 
     arrival_rate_per_hour governs BURST events per hour.
-    Each burst emits N jobs with identical arrival_time, where
-    N ~ Uniform[burst_size_min, burst_size_max].
-    When burst_size_min == burst_size_max == 1 (default), behaviour
-    is identical to the original single-job Poisson process.
+    Each burst emits N jobs with identical arrival_time, where N ~ Uniform[burst_size_min, burst_size_max].
+
+    arrival_spacing (per centroid):
+      'poisson'     — memoryless rng.exponential(1/λ); exact Poisson, preserves clustering.
+      'approximate' — np.average of 5000 draws; reduced variance for test configs.
+
+    Time windows (BSIM-77/78): piecewise-constant Poisson with exact boundary crossing.
+      At time t in a context ending at W_end with rate λ:
+        Draw τ ~ Exp(λ). If t+τ ≥ W_end: discard, advance to W_end, restart with new rate.
+        If t+τ < W_end: place arrival at t+τ.
     """
     records = []
     for centroid in centroids:
-        lam = centroid.arrival_rate_per_hour / 3600.0
         lo  = centroid.burst_size_min
         hi  = centroid.burst_size_max
+        approximate = (centroid.arrival_spacing == "approximate")
         t   = 0.0
-        while True:
-            t += np.average(rng.exponential(1.0 / lam, 5000))
-            if t > horizon_seconds:
+        while t < horizon_seconds:
+            window  = _active_window(centroid, t)
+            w_end   = _window_boundary(centroid, t, horizon_seconds)
+            lam     = ((window.burst_rate / 3600.0)
+                       if (window and window.burst_rate is not None)
+                       else centroid.arrival_rate_per_hour / 3600.0)
+
+            if approximate:
+                gap = float(np.average(rng.exponential(1.0 / lam, 5000)))
+            else:
+                gap = rng.exponential(1.0 / lam)
+
+            if t + gap >= w_end:
+                # Boundary crossing — discard this draw, restart at boundary
+                t = w_end
+                continue
+
+            t += gap
+            if t >= horizon_seconds:
                 break
-            # Draw burst size: uniform integer in [lo, hi]
+
+            active_weights = (window.centroid_bin_weights
+                              if (window and window.centroid_bin_weights is not None)
+                              else None)
             n = int(rng.integers(lo, hi + 1)) if hi > lo else lo
             for _ in range(n):
-                records.append(
-                    ArrivalRecord(arrival_time=t, centroid_id=centroid.id)
-                )
+                records.append(ArrivalRecord(
+                    arrival_time=t,
+                    centroid_id=centroid.id,
+                    bin_weights_override=active_weights,
+                ))
     records.sort(key=lambda r: r.arrival_time)
     return records
 
@@ -142,8 +195,11 @@ def build_event_list(config: SimulationConfig) -> EventList:
     rng = np.random.default_rng(config.random_seed)
     centroid_map = {c.id: c for c in config.centroids}
     arrivals = generate_arrivals(config.centroids, config.horizon_seconds, rng)
-    events = [_event_from_job(r.arrival_time, sample_job(centroid_map[r.centroid_id], rng,
-              config.network_bandwidth_mbps)) for r in arrivals]
+    events = [_event_from_job(r.arrival_time,
+                              sample_job(centroid_map[r.centroid_id], rng,
+                                         config.network_bandwidth_mbps,
+                                         bin_weights_override=r.bin_weights_override))
+              for r in arrivals]
     metadata = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "random_seed": config.random_seed,

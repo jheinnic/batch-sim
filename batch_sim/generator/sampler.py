@@ -26,7 +26,88 @@ def _pareto_multiplier(
     return float(np.clip(multiplier, min_mult, max_mult))
 
 
-def sample_job(centroid: CentroidConfig, rng: Generator, network_bandwidth_mbps: float) -> JobSpec:
+def _sample_job_bin_mode(
+    centroid: CentroidConfig,
+    rng: Generator,
+    network_bandwidth_mbps: float,
+    bin_weights_override: list[float] | None = None,
+) -> JobSpec:
+    """Sample a job using the discrete bin model (BSIM-76)."""
+    weights = np.array(
+        bin_weights_override if bin_weights_override is not None
+        else centroid.centroid_bin_weights,
+        dtype=float,
+    )
+    cdf = np.cumsum(weights / weights.sum())
+    u = float(rng.uniform())
+    bin_idx = min(int(np.searchsorted(cdf, u)), len(weights) - 1)
+
+    def _get(arr, fallback):
+        return arr[bin_idx] if arr is not None else fallback
+
+    download_gb = _get(centroid.bin_download_gb, centroid.download_gb)
+    upload_gb = _get(centroid.bin_upload_gb, centroid.upload_gb)
+    preprocess_duration_s = _get(
+        centroid.bin_preprocess_duration_s, centroid.preprocess_duration_seconds
+    )
+    scale = _get(centroid.bin_workhorse_scale, 1.0)
+    cpu_stages = [s * scale for s in centroid.workhorse_cpu_stages]
+    hard_vcpu = list(centroid.workhorse_hard_vcpu)
+
+    if centroid.workhorse_io_wait_per_stage is not None:
+        io_wait_fractions = list(centroid.workhorse_io_wait_per_stage)
+        io_wait = float(np.mean(io_wait_fractions))
+    else:
+        io_wait = float(centroid.io_wait_fraction)
+        io_wait_fractions = None
+
+    profile = build_phase_profile(
+        download_gb=download_gb,
+        preprocess_a=centroid.preprocess_memory_exponent_a,
+        preprocess_b=centroid.preprocess_memory_exponent_b,
+        preprocess_duration_s=preprocess_duration_s,
+        workhorse_cpu_stages=cpu_stages,
+        workhorse_hard_vcpu=hard_vcpu,
+        io_wait_fraction=io_wait,
+        upload_gb=upload_gb,
+        network_bandwidth_mbps=network_bandwidth_mbps,
+        io_wait_fractions=io_wait_fractions,
+    )
+
+    # Override RAM from bin arrays when specified
+    if centroid.bin_preloader_hard_limit_gb is not None:
+        hard_limit = centroid.bin_preloader_hard_limit_gb[bin_idx]
+        profile.preprocess_peak_ram_gb = hard_limit
+        if centroid.bin_preloader_actual_gb is not None:
+            lo, hi = centroid.bin_preloader_actual_gb[bin_idx]
+            profile.preprocess_steady_ram_gb = float(rng.uniform(lo, hi))
+        else:
+            profile.preprocess_steady_ram_gb = 0.08 * hard_limit
+
+    if centroid.bin_steady_state_hard_limit_gb is not None:
+        profile.workhorse_ram_gb = centroid.bin_steady_state_hard_limit_gb[bin_idx]
+        if centroid.bin_steady_state_actual_gb is not None:
+            lo, hi = centroid.bin_steady_state_actual_gb[bin_idx]
+            # stored in workhorse_ram_gb; hard limit tracked separately if needed
+            profile.workhorse_ram_gb = float(rng.uniform(lo, hi))
+
+    soft_cpu = (max(centroid.workhorse_soft_vcpu) if centroid.workhorse_soft_vcpu
+                else profile.workhorse_declared_vcpu)
+    hard_cpu = max(hard_vcpu)
+
+    return JobSpec(centroid_id=centroid.id, profile=profile,
+                   soft_cpu=soft_cpu, hard_cpu=hard_cpu)
+
+
+def sample_job(
+    centroid: CentroidConfig,
+    rng: Generator,
+    network_bandwidth_mbps: float,
+    bin_weights_override: list[float] | None = None,
+) -> JobSpec:
+    if centroid.centroid_bin_weights is not None or bin_weights_override is not None:
+        return _sample_job_bin_mode(centroid, rng, network_bandwidth_mbps, bin_weights_override)
+
     alpha   = centroid.pareto_alpha
     lo      = centroid.pareto_multiplier_min
     hi      = centroid.pareto_multiplier_max
