@@ -21,6 +21,7 @@ centroids:
     label: "Compute-Heavy"
     description: "Long multi-stage CPU-bound jobs."
     arrival_rate_per_hour: 2.0
+    arrival_spacing: approximate
     burst_size_min: 30
     burst_size_max: 30
     pareto_alpha: 1.2
@@ -40,6 +41,7 @@ centroids:
     label: "Compute-Heavy"
     description: "Long multi-stage CPU-bound jobs."
     arrival_rate_per_hour: 2.0
+    arrival_spacing: approximate
     burst_size_min: 30
     burst_size_max: 30
     pareto_alpha: 1.2

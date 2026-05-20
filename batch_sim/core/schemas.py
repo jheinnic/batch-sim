@@ -1,13 +1,39 @@
 """BSIM-2: Pydantic configuration schemas for all simulation inputs."""
 from __future__ import annotations
 from enum import Enum
-from typing import Annotated
-from pydantic import BaseModel, Field, model_validator
+from typing import Annotated, Literal
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 PositiveFloat = Annotated[float, Field(gt=0)]
 NonNegativeFloat = Annotated[float, Field(ge=0)]
 PositiveInt = Annotated[int, Field(gt=0)]
 Fraction = Annotated[float, Field(ge=0.0, le=1.0)]
+
+
+class TimeWindowOverride(BaseModel):
+    """BSIM-77: Per-centroid time-window override for arrival rate and bin weights."""
+    start_time_s: NonNegativeFloat
+    end_time_s: PositiveFloat
+    burst_rate: PositiveFloat | None = Field(
+        default=None,
+        description="Override arrival rate (bursts/hour) during this window. "
+                    "Absent = inherit centroid baseline.",
+    )
+    centroid_bin_weights: list[PositiveFloat] | None = Field(
+        default=None,
+        description="Override bin weights during this window. "
+                    "Must have the same length as the centroid's centroid_bin_weights. "
+                    "Absent = inherit centroid baseline weights.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> "TimeWindowOverride":
+        if self.end_time_s <= self.start_time_s:
+            raise ValueError(
+                f"end_time_s ({self.end_time_s}) must be > "
+                f"start_time_s ({self.start_time_s})"
+            )
+        return self
 
 
 class CentroidConfig(BaseModel):
@@ -76,6 +102,62 @@ class CentroidConfig(BaseModel):
     )
     upload_gb: PositiveFloat
 
+    # BSIM-74: inter-arrival draw strategy
+    arrival_spacing: Literal["poisson", "approximate"] = Field(
+        default="poisson",
+        description=(
+            "poisson (default): memoryless rng.expovariate — exact Poisson, "
+            "preserves burst clustering. "
+            "approximate: average of 5000 draws — reduced variance, predictable "
+            "arrival counts. Use for test configs (tiny, teeny)."
+        )
+    )
+
+    # BSIM-75: discrete size-bin model (optional; absent = Pareto path)
+    centroid_bin_weights: list[PositiveFloat] | None = Field(
+        default=None,
+        description="Unnormalized bin weights. Length determines number of bins. "
+                    "When present, bin sampling replaces the Pareto multiplier path.",
+    )
+    bin_download_gb: list[PositiveFloat] | None = Field(
+        default=None, description="Download size in GB per bin."
+    )
+    bin_upload_gb: list[PositiveFloat] | None = Field(
+        default=None, description="Upload size in GB per bin."
+    )
+    bin_preprocess_duration_s: list[PositiveFloat] | None = Field(
+        default=None, description="Preprocess wall-clock duration in seconds per bin."
+    )
+    bin_preloader_hard_limit_gb: list[PositiveFloat] | None = Field(
+        default=None, description="Declared preprocess RAM hard limit per bin (K8S reservation)."
+    )
+    bin_preloader_actual_gb: list[list[float]] | None = Field(
+        default=None,
+        description="Per-bin [lo, hi] range for actual preprocess peak RAM. "
+                    "Uniform draw within this range. Each entry must be [lo, hi] with 0 < lo < hi.",
+    )
+    bin_steady_state_hard_limit_gb: list[PositiveFloat] | None = Field(
+        default=None, description="Declared workhorse RAM hard limit per bin."
+    )
+    bin_steady_state_actual_gb: list[list[float]] | None = Field(
+        default=None,
+        description="Per-bin [lo, hi] range for actual workhorse RAM. "
+                    "Each entry must be [lo, hi] with 0 < lo < hi.",
+    )
+    bin_workhorse_scale: list[PositiveFloat] | None = Field(
+        default=None,
+        description="Scale factor applied to workhorse_cpu_stages per bin. "
+                    "1.0 = nominal duration; 2.0 = twice as long.",
+    )
+
+    # BSIM-77: time-window overrides (optional)
+    time_windows: list[TimeWindowOverride] | None = Field(
+        default=None,
+        description="Per-centroid time-window overrides for burst_rate and bin weights. "
+                    "Windows must be non-overlapping. Gaps between windows inherit the "
+                    "centroid baseline.",
+    )
+
     @model_validator(mode="after")
     def _validate_stage_arrays(self) -> "CentroidConfig":
         stages = self.workhorse_cpu_stages
@@ -122,6 +204,67 @@ class CentroidConfig(BaseModel):
                         f"workhorse_soft_vcpu[{i}]={s} > "
                         f"workhorse_hard_vcpu[{i}]={h}"
                     )
+
+        # BSIM-75: bin model validation
+        if self.centroid_bin_weights is not None:
+            n_bins = len(self.centroid_bin_weights)
+            if n_bins == 0:
+                raise ValueError("centroid_bin_weights must not be empty")
+            bin_arrays = {
+                "bin_download_gb": self.bin_download_gb,
+                "bin_upload_gb": self.bin_upload_gb,
+                "bin_preprocess_duration_s": self.bin_preprocess_duration_s,
+                "bin_preloader_hard_limit_gb": self.bin_preloader_hard_limit_gb,
+                "bin_preloader_actual_gb": self.bin_preloader_actual_gb,
+                "bin_steady_state_hard_limit_gb": self.bin_steady_state_hard_limit_gb,
+                "bin_steady_state_actual_gb": self.bin_steady_state_actual_gb,
+                "bin_workhorse_scale": self.bin_workhorse_scale,
+            }
+            for name, arr in bin_arrays.items():
+                if arr is not None and len(arr) != n_bins:
+                    raise ValueError(
+                        f"{name} has {len(arr)} entries but "
+                        f"centroid_bin_weights has {n_bins}"
+                    )
+            for pair_name in ("bin_preloader_actual_gb", "bin_steady_state_actual_gb"):
+                arr = getattr(self, pair_name)
+                if arr is not None:
+                    for i, pair in enumerate(arr):
+                        if len(pair) != 2:
+                            raise ValueError(
+                                f"{pair_name}[{i}] must be [lo, hi]; got {pair}"
+                            )
+                        lo, hi = pair
+                        if lo <= 0 or lo >= hi:
+                            raise ValueError(
+                                f"{pair_name}[{i}]=[{lo}, {hi}] invalid: "
+                                f"require 0 < lo < hi"
+                            )
+
+        # BSIM-77: time-window validation
+        if self.time_windows:
+            n_bins = len(self.centroid_bin_weights) if self.centroid_bin_weights else None
+            sorted_windows = sorted(self.time_windows, key=lambda w: w.start_time_s)
+            for i, w in enumerate(sorted_windows):
+                if i > 0 and w.start_time_s < sorted_windows[i - 1].end_time_s:
+                    raise ValueError(
+                        f"time_windows overlap: window ending at "
+                        f"{sorted_windows[i-1].end_time_s}s and window starting at "
+                        f"{w.start_time_s}s"
+                    )
+                if w.centroid_bin_weights is not None:
+                    if n_bins is None:
+                        raise ValueError(
+                            "time_window centroid_bin_weights override requires "
+                            "centroid_bin_weights to be set on the centroid"
+                        )
+                    if len(w.centroid_bin_weights) != n_bins:
+                        raise ValueError(
+                            f"time_window [{w.start_time_s}, {w.end_time_s}) "
+                            f"centroid_bin_weights has {len(w.centroid_bin_weights)} "
+                            f"entries but centroid has {n_bins}"
+                        )
+
         return self
 
 
@@ -177,6 +320,7 @@ class InstanceRegistryConfig(BaseModel):
 class SchedulerType(str, Enum):
     BATCH = "batch"
     K8S = "k8s"
+    K8SPLUS = "k8splus"
 
 
 class SchedulerConfig(BaseModel):
