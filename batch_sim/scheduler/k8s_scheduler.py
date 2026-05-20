@@ -46,6 +46,7 @@ class K8SScheduler:
             windows = sorted(self.cfg.time_window_policy, key=lambda w: w.start_time_s)
             self._active_window_idx = self._find_window_idx(env.now % 86400.0, windows)
             env.process(self._policy_timer(env, windows))
+        env.process(self._scale_out_monitor(env))
 
     # -----------------------------------------------------------------------
     # BSIM-84: time-window helpers
@@ -175,11 +176,6 @@ class K8SScheduler:
         proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
         self._panic_monitors[job.job_id] = proc
         self._try_schedule(env)
-        # Proactive provisioning: launch immediately if the cluster has no active capacity.
-        # Prevents a cold cluster from waiting the full panic_threshold before any job runs.
-        if not any(n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
-                   for n in self._nodes.values()):
-            self.guarantee_capacity(env, job)
 
     def on_job_complete(self, env, node, job):
         soft = job.profile.soft_limit_ram_gb
@@ -318,6 +314,27 @@ class K8SScheduler:
             self._drain_monitors[node_id] = proc
 
         self._try_schedule(env)
+
+    def _scale_out_monitor(self, env):
+        """
+        Polling coroutine: provisions a node when the oldest queued job has
+        waited at least cfg.scale_out_threshold_s seconds without being placed.
+        Sleeps for cfg.scale_out_poll_s as a cooldown after each launch.
+        """
+        while True:
+            if not self._queue:
+                yield env.timeout(self.cfg.scale_out_poll_s)
+                continue
+
+            oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
+            remaining = self.cfg.scale_out_threshold_s - oldest_wait
+
+            if remaining <= 0:
+                entry = sorted(self._queue._heap)[0]
+                self.guarantee_capacity(env, entry.job)
+                yield env.timeout(self.cfg.scale_out_poll_s)
+            else:
+                yield env.timeout(remaining)
 
     def _panic_monitor(self, env, job, enqueue_time):
         try: yield env.timeout(self.cfg.panic_threshold_seconds)

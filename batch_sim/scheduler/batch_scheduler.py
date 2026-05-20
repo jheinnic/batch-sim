@@ -22,6 +22,7 @@ class BatchScheduler:
         self._overload_handler = OverloadHandler(
             metrics=self.metrics, scheduler_cfg=self.cfg,
             replay_queue=self._queue, rng=self.rng)
+        env.process(self._scale_out_monitor(env))
 
     def on_job_arrival(self, env, job, arrival_time):
         if not hasattr(self, "_env"): self._setup(env)
@@ -52,32 +53,27 @@ class BatchScheduler:
         instance = self.registry.cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         if instance: env.process(self._launch_node(env, instance, for_job=job))
 
-    def _maybe_provision_more(self, env) -> None:
+    def _scale_out_monitor(self, env):
         """
-        Progressive scale-out: if unplaceable jobs remain AND no node is currently
-        launching, launch one more node for the highest-priority queued job.
+        Polling coroutine: provisions a node when the oldest queued job has
+        waited at least cfg.scale_out_threshold_s seconds without being placed.
+        Sleeps for cfg.scale_out_poll_s as a cooldown after each launch, which
+        throttles cascading scale-out on sustained workloads.
+        """
+        while True:
+            if not self._queue:
+                yield env.timeout(self.cfg.scale_out_poll_s)
+                continue
 
-        This models real AWS Batch behaviour — the compute environment scales out
-        to run queued jobs in parallel rather than serialising them on one node.
-        Called at the end of _try_schedule so each node-ready event can trigger
-        the next launch in a controlled, one-at-a-time cascade.
-        """
-        if not self._queue:
-            return
-        # If a node is already on the way, wait for it before launching another.
-        if any(n.state == NodeStateEnum.LAUNCHING for n in self._nodes.values()):
-            return
-        entry = sorted(self._queue._heap)[0]   # highest-priority unplaced job
-        job = entry.job; p = job.profile
-        _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
-        # Only launch if no READY node has available capacity for this job right now.
-        if any(n.state == NodeStateEnum.READY
-               and self._batch_fits(n, p.peak_ram_gb, _vcpu)
-               for n in self._nodes.values()):
-            return   # a READY node can already serve this job
-        instance = self.registry.cheapest_fitting(p.peak_ram_gb, _vcpu)
-        if instance:
-            env.process(self._launch_node(env, instance))   # no reservation — any job can use it
+            oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
+            remaining = self.cfg.scale_out_threshold_s - oldest_wait
+
+            if remaining <= 0:
+                entry = sorted(self._queue._heap)[0]
+                self.guarantee_capacity(env, entry.job)
+                yield env.timeout(self.cfg.scale_out_poll_s)
+            else:
+                yield env.timeout(remaining)
 
     def _try_schedule(self, env):
         """Scan full queue for placeable jobs; do not stop at first unplaceable
@@ -94,7 +90,6 @@ class BatchScheduler:
                     heapq.heapify(self._queue._heap)
                     changed = True
                     break
-        self._maybe_provision_more(env)
 
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile

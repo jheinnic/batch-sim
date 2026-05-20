@@ -425,6 +425,20 @@ class SchedulerConfig(BaseModel):
             "When absent, the scheduler uses its default instance-selection behavior."
         ),
     )
+    scale_out_threshold_s: NonNegativeFloat = Field(
+        default=0.0,
+        description=(
+            "BSIM-86: Minimum queue-wait time (seconds) before the scale-out monitor "
+            "provisions a new node. 0 = provision immediately for any unplaceable job."
+        ),
+    )
+    scale_out_poll_s: PositiveFloat = Field(
+        default=60.0,
+        description=(
+            "BSIM-86: Polling interval (seconds) for the scale-out monitor. "
+            "Also serves as the cooldown period after each node launch."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_time_window_policy(self) -> "SchedulerConfig":

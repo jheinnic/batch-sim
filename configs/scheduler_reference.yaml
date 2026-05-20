@@ -7,3 +7,5 @@ idle_check_interval_seconds: 30
 max_retries: 3
 replay_delay_seconds: 120
 k8s_os_overhead_gb: 2.0
+scale_out_threshold_s: 0.0   # seconds a job must wait before scale-out fires (0 = immediate)
+scale_out_poll_s: 60.0       # cooldown between successive node launches
