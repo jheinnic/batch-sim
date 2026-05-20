@@ -55,10 +55,9 @@ class BatchScheduler:
 
     def _scale_out_monitor(self, env):
         """
-        Polling coroutine: provisions a node when the oldest queued job has
-        waited at least cfg.scale_out_threshold_s seconds without being placed.
-        Sleeps for cfg.scale_out_poll_s as a cooldown after each launch, which
-        throttles cascading scale-out on sustained workloads.
+        Polling coroutine: when the oldest queued job has waited at least
+        cfg.scale_out_threshold_s, calls _provision_to_demand to launch nodes
+        for the entire queue at once, then sleeps cfg.scale_out_poll_s.
         """
         while True:
             if not self._queue:
@@ -68,12 +67,38 @@ class BatchScheduler:
             oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
             remaining = self.cfg.scale_out_threshold_s - oldest_wait
 
-            if remaining <= 0:
-                entry = sorted(self._queue._heap)[0]
-                self.guarantee_capacity(env, entry.job)
-                yield env.timeout(self.cfg.scale_out_poll_s)
-            else:
+            if remaining > 0:
                 yield env.timeout(remaining)
+            else:
+                self._provision_to_demand(env)
+                yield env.timeout(self.cfg.scale_out_poll_s)
+
+    def _provision_to_demand(self, env):
+        """
+        Greedy first-fit over the full queue: for each queued job that cannot
+        fit into any existing (READY or LAUNCHING) node's remaining capacity,
+        launch a new node and add its residual capacity to the virtual pool.
+        Models real AWS Batch demand-based autoscaling.
+        """
+        virtual = [
+            [n.physical_ram_gb - n.allocated_ram_gb,
+             n.physical_vcpu - n.allocated_vcpu]
+            for n in self._nodes.values()
+            if n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
+        ]
+        for entry in sorted(self._queue._heap):
+            job = entry.job; p = job.profile
+            _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
+            ram = p.peak_ram_gb
+            for vn in virtual:
+                if vn[0] >= ram and vn[1] >= _vcpu:
+                    vn[0] -= ram; vn[1] -= _vcpu
+                    break
+            else:
+                instance = self.registry.cheapest_fitting(ram, _vcpu)
+                if instance:
+                    env.process(self._launch_node(env, instance))
+                    virtual.append([instance.ram_gb - ram, instance.vcpu - _vcpu])
 
     def _try_schedule(self, env):
         """Scan full queue for placeable jobs; do not stop at first unplaceable

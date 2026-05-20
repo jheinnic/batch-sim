@@ -317,9 +317,9 @@ class K8SScheduler:
 
     def _scale_out_monitor(self, env):
         """
-        Polling coroutine: provisions a node when the oldest queued job has
-        waited at least cfg.scale_out_threshold_s seconds without being placed.
-        Sleeps for cfg.scale_out_poll_s as a cooldown after each launch.
+        Polling coroutine: when the oldest queued job has waited at least
+        cfg.scale_out_threshold_s, calls _provision_to_demand to launch nodes
+        for the entire queue at once, then sleeps cfg.scale_out_poll_s.
         """
         while True:
             if not self._queue:
@@ -329,12 +329,42 @@ class K8SScheduler:
             oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
             remaining = self.cfg.scale_out_threshold_s - oldest_wait
 
-            if remaining <= 0:
-                entry = sorted(self._queue._heap)[0]
-                self.guarantee_capacity(env, entry.job)
-                yield env.timeout(self.cfg.scale_out_poll_s)
-            else:
+            if remaining > 0:
                 yield env.timeout(remaining)
+            else:
+                self._provision_to_demand(env)
+                yield env.timeout(self.cfg.scale_out_poll_s)
+
+    def _provision_to_demand(self, env):
+        """
+        Greedy first-fit over the full queue: for each queued job that cannot
+        fit into any existing (READY or LAUNCHING) node's remaining K8S capacity,
+        launch a new node via _select_instance_for_job and add its residual to
+        the virtual pool. The time-window spawn_rate_per_min cooldown in
+        _select_instance_for_job naturally caps how many launch in one call.
+        """
+        virtual = []
+        for n in self._nodes.values():
+            if n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING):
+                cap = self._capacity_cache.get(n.instance.name)
+                if cap and cap.effective_schedulable_gb > 0:
+                    virtual.append([cap.effective_schedulable_gb - n.allocated_ram_gb,
+                                     n.physical_vcpu - n.allocated_vcpu])
+        for entry in sorted(self._queue._heap):
+            job = entry.job; p = job.profile
+            soft = p.soft_limit_ram_gb
+            vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
+            for vn in virtual:
+                if vn[0] >= soft and vn[1] >= vcpu:
+                    vn[0] -= soft; vn[1] -= vcpu
+                    break
+            else:
+                instance = self._select_instance_for_job(job)
+                if instance:
+                    cap = self._k8s_capacity(instance)
+                    env.process(self._launch_node(env, instance))
+                    virtual.append([cap.effective_schedulable_gb - soft,
+                                     instance.vcpu - vcpu])
 
     def _panic_monitor(self, env, job, enqueue_time):
         try: yield env.timeout(self.cfg.panic_threshold_seconds)
