@@ -20,6 +20,12 @@ class InstanceRegistry:
     @property
     def all_types(self): return list(self._types)
 
+    def get_by_name(self, name: str) -> Optional[InstanceTypeConfig]:
+        for t in self._types:
+            if t.name == name:
+                return t
+        return None
+
     def cheapest_fitting(self, min_ram_gb, min_vcpu) -> Optional[InstanceTypeConfig]:
         for t in self._types:
             if t.ram_gb >= min_ram_gb and t.vcpu >= min_vcpu:

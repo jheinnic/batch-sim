@@ -323,6 +323,89 @@ class SchedulerType(str, Enum):
     K8SPLUS = "k8splus"
 
 
+# ---------------------------------------------------------------------------
+# BSIM-83: Time-based scheduling policy schema
+# ---------------------------------------------------------------------------
+
+class DrainRule(BaseModel):
+    """
+    A single drain condition: node enters DRAINING when idle_vcpu has
+    continuously exceeded this threshold for duration_s seconds.
+    """
+    idle_vcpu: NonNegativeFloat
+    duration_s: PositiveFloat
+
+
+class QueuePolicy(BaseModel):
+    """
+    A memory-band queue: handles jobs whose preprocess_peak_ram_gb falls
+    in (exclusive_min_gb, inclusive_max_gb].
+    """
+    exclusive_min_gb: NonNegativeFloat = Field(default=0.0)
+    inclusive_max_gb: PositiveFloat
+    spawn_instance_class: str
+    spawn_rate_per_min: PositiveFloat = Field(
+        default=1.0,
+        description="Maximum node launches per minute for this queue.",
+    )
+    drain_rules: list[DrainRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_queue(self) -> "QueuePolicy":
+        if self.inclusive_max_gb <= self.exclusive_min_gb:
+            raise ValueError(
+                f"inclusive_max_gb ({self.inclusive_max_gb}) must be > "
+                f"exclusive_min_gb ({self.exclusive_min_gb})"
+            )
+        if len(self.drain_rules) >= 2:
+            sorted_rules = sorted(self.drain_rules, key=lambda r: r.idle_vcpu)
+            for i in range(len(sorted_rules) - 1):
+                lo, hi = sorted_rules[i], sorted_rules[i + 1]
+                if hi.duration_s >= lo.duration_s:
+                    raise ValueError(
+                        f"drain_rules not monotone: "
+                        f"idle_vcpu={lo.idle_vcpu} → duration_s={lo.duration_s}, "
+                        f"idle_vcpu={hi.idle_vcpu} → duration_s={hi.duration_s}; "
+                        f"higher idle_vcpu must pair with strictly shorter duration_s"
+                    )
+        return self
+
+
+class TimeWindowPolicy(BaseModel):
+    """
+    A time window within a 24-hour day [start_time_s, end_time_s) that
+    defines one or more memory-band queues.
+    """
+    start_time_s: NonNegativeFloat
+    end_time_s: PositiveFloat
+    queues: list[QueuePolicy] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_window(self) -> "TimeWindowPolicy":
+        if self.end_time_s <= self.start_time_s:
+            raise ValueError(
+                f"end_time_s ({self.end_time_s}) must be > "
+                f"start_time_s ({self.start_time_s})"
+            )
+        queues_sorted = sorted(self.queues, key=lambda q: q.exclusive_min_gb)
+        if queues_sorted[0].exclusive_min_gb != 0.0:
+            raise ValueError(
+                f"First queue band in window [{self.start_time_s}, {self.end_time_s}) "
+                f"must start at exclusive_min_gb=0; "
+                f"got {queues_sorted[0].exclusive_min_gb}"
+            )
+        for i in range(len(queues_sorted) - 1):
+            lo, hi = queues_sorted[i], queues_sorted[i + 1]
+            if lo.inclusive_max_gb != hi.exclusive_min_gb:
+                raise ValueError(
+                    f"Queue band gap/overlap in window [{self.start_time_s}, {self.end_time_s}): "
+                    f"band ({lo.exclusive_min_gb}, {lo.inclusive_max_gb}] "
+                    f"is not contiguous with "
+                    f"band ({hi.exclusive_min_gb}, {hi.inclusive_max_gb}]"
+                )
+        return self
+
+
 class SchedulerConfig(BaseModel):
     scheduler_type: SchedulerType
     panic_threshold_seconds: PositiveFloat = 300.0
@@ -333,6 +416,40 @@ class SchedulerConfig(BaseModel):
     max_retries: PositiveInt = 3
     replay_delay_seconds: NonNegativeFloat = 10.0
     k8s_os_overhead_gb: NonNegativeFloat = 2.0
+    time_window_policy: list[TimeWindowPolicy] | None = Field(
+        default=None,
+        description=(
+            "BSIM-83: Optional time-based scheduling policy. "
+            "When present, partitions the 24-hour day into windows that each "
+            "define memory-band queues with explicit instance classes and drain rules. "
+            "When absent, the scheduler uses its default instance-selection behavior."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_time_window_policy(self) -> "SchedulerConfig":
+        if not self.time_window_policy:
+            return self
+        windows = sorted(self.time_window_policy, key=lambda w: w.start_time_s)
+        if windows[0].start_time_s != 0.0:
+            raise ValueError(
+                f"time_window_policy must start at 0s; "
+                f"first window starts at {windows[0].start_time_s}s"
+            )
+        if windows[-1].end_time_s != 86400.0:
+            raise ValueError(
+                f"time_window_policy must end at 86400s (24 h); "
+                f"last window ends at {windows[-1].end_time_s}s"
+            )
+        for i in range(len(windows) - 1):
+            lo, hi = windows[i], windows[i + 1]
+            if lo.end_time_s != hi.start_time_s:
+                raise ValueError(
+                    f"time_window_policy gap/overlap: "
+                    f"window ending at {lo.end_time_s}s is not contiguous with "
+                    f"window starting at {hi.start_time_s}s"
+                )
+        return self
 
 
 class ExperimentConfig(BaseModel):
