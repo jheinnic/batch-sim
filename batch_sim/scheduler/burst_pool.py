@@ -75,10 +75,13 @@ class NodeBurstPool:
         SimPy generator. Blocks until `peak_ram_gb` of burst headroom is free,
         then marks it as in use.
         """
-        while self._in_use + peak_ram_gb > self._headroom:
+        if self._in_use + peak_ram_gb > self._headroom:
             event = self._env.event()
             self._waiters.append((peak_ram_gb, event))
             yield event
+            # release() pre-claimed peak_ram_gb for us via _in_use += required.
+            # Do not add to _in_use again or re-check the condition.
+            return
         self._in_use += peak_ram_gb
 
     def release(self, peak_ram_gb: float) -> None:

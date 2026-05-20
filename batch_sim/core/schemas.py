@@ -335,6 +335,79 @@ class SchedulerConfig(BaseModel):
     k8s_os_overhead_gb: NonNegativeFloat = 2.0
 
 
+class K8SPlusPoolConfig(BaseModel):
+    """BSIM-88: Configuration for one RAM-band pool in the K8S+ multi-pool scheduler."""
+    id: str
+    exclusive_min_gb: NonNegativeFloat = Field(
+        default=0.0,
+        description="Lower bound (exclusive) of the RAM band this pool handles.",
+    )
+    inclusive_max_gb: PositiveFloat = Field(
+        description="Upper bound (inclusive) of the RAM band this pool handles.",
+    )
+    instance_class: str = Field(
+        description="Instance type name (must exist in the instance registry).",
+    )
+    daemonset_headroom_gb: PositiveFloat = Field(
+        description=(
+            "Admin-configured GB reserved for daemonsets and OS on each node. "
+            "scheduled_zone = node_ram_gb - k8s_os_overhead_gb - daemonset_headroom_gb."
+        ),
+    )
+    spawn_rate_per_min: PositiveFloat = Field(
+        default=1.0,
+        description="Max node launches per minute for this pool (rate-limiter).",
+    )
+    age_cordon_s: PositiveFloat = Field(
+        default=3600.0,
+        description="Seconds after node launch at which the node is cordoned (no new placements).",
+    )
+
+    @model_validator(mode="after")
+    def _validate_band(self) -> "K8SPlusPoolConfig":
+        if self.inclusive_max_gb <= self.exclusive_min_gb:
+            raise ValueError(
+                f"inclusive_max_gb ({self.inclusive_max_gb}) must be > "
+                f"exclusive_min_gb ({self.exclusive_min_gb})"
+            )
+        if self.inclusive_max_gb > self.daemonset_headroom_gb:
+            raise ValueError(
+                f"inclusive_max_gb ({self.inclusive_max_gb}) must be <= "
+                f"daemonset_headroom_gb ({self.daemonset_headroom_gb}): "
+                f"jobs at the band ceiling must fit within burst headroom"
+            )
+        return self
+
+
+class K8SPlusSchedulerConfig(BaseModel):
+    """BSIM-87: Scheduler config for K8S+ multi-pool scheduler (replaces SchedulerConfig for k8splus)."""
+    scheduler_type: SchedulerType = SchedulerType.K8SPLUS
+    panic_threshold_seconds: PositiveFloat = 300.0
+    sla_target_seconds: PositiveFloat = 600.0
+    warmup_delay_seconds: PositiveFloat = 90.0
+    idle_timeout_seconds: PositiveFloat = 300.0
+    idle_check_interval_seconds: PositiveFloat = 30.0
+    max_retries: PositiveInt = 3
+    replay_delay_seconds: NonNegativeFloat = 10.0
+    k8s_os_overhead_gb: NonNegativeFloat = 2.0
+    pools: list[K8SPlusPoolConfig] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_pools(self) -> "K8SPlusSchedulerConfig":
+        sorted_pools = sorted(self.pools, key=lambda p: p.exclusive_min_gb)
+        for i, pool in enumerate(sorted_pools):
+            if i > 0 and pool.exclusive_min_gb < sorted_pools[i - 1].inclusive_max_gb:
+                raise ValueError(
+                    f"Pool '{pool.id}' band ({pool.exclusive_min_gb}, {pool.inclusive_max_gb}] "
+                    f"overlaps with pool '{sorted_pools[i-1].id}' "
+                    f"({sorted_pools[i-1].exclusive_min_gb}, {sorted_pools[i-1].inclusive_max_gb}]"
+                )
+        ids = [p.id for p in self.pools]
+        if len(ids) != len(set(ids)):
+            raise ValueError("K8SPlusPoolConfig ids must be unique")
+        return self
+
+
 class ExperimentConfig(BaseModel):
     event_list_path: str
     instance_registry_path: str = "configs/instance_registry.yaml"

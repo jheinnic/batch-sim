@@ -1,0 +1,42 @@
+# K8S+ multi-pool scheduler config (BSIM-87/88).
+# Designed for the jch workload (peak RAM up to ~96 GB per jch_instance_registry_01.yaml).
+#
+# Pool layout (jch workload):
+#   standard: jobs with peak RAM in (0, 96] GB → c7i.16xlarge (128 GB)
+#     scheduled_zone = 128 - 2 (OS) - 96 (headroom) = 30 GB
+#     holds ~3–4 jobs at steady-state (~8 GB soft limit each)
+#     age_cordon_s = 7200 (2 h) — cordon before retirement to drain gracefully
+#
+#   large: jobs with peak RAM in (96, 400] GB → r7i.16xlarge (512 GB)
+#     scheduled_zone = 512 - 2 (OS) - 400 (headroom) = 110 GB
+#     holds ~1–2 very large jobs; Phase 2 serialized within headroom
+#
+# inclusive_max_gb must be <= daemonset_headroom_gb so every job in the band
+# can fit in the burst pool during Phase 2.
+
+scheduler_type: k8splus
+panic_threshold_seconds: 9000
+sla_target_seconds: 6000
+warmup_delay_seconds: 30
+idle_timeout_seconds: 120
+idle_check_interval_seconds: 30
+max_retries: 3
+replay_delay_seconds: 120
+k8s_os_overhead_gb: 2.0
+
+pools:
+  - id: standard
+    exclusive_min_gb: 0.0
+    inclusive_max_gb: 96.0
+    instance_class: c7i.16xlarge
+    daemonset_headroom_gb: 96.0
+    spawn_rate_per_min: 2.0
+    age_cordon_s: 7200.0
+
+  - id: large
+    exclusive_min_gb: 96.0
+    inclusive_max_gb: 400.0
+    instance_class: r7i.16xlarge
+    daemonset_headroom_gb: 400.0
+    spawn_rate_per_min: 1.0
+    age_cordon_s: 7200.0
