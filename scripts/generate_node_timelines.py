@@ -58,7 +58,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from batch_sim.core.config_loader import load_simulation_config, load_scheduler_config
-from batch_sim.registry.instance_registry import InstanceRegistry
+from batch_sim.registry.instance_registry import InstanceRegistry, compute_k8s_capacity
 from batch_sim.generator.event_list import load_event_list
 from batch_sim.core.schemas import SchedulerType
 from batch_sim.metrics.collector import MetricsCollector, EventType
@@ -125,6 +125,7 @@ def run_and_extract(
     registry_path: str,
     seed: int,
     event_log_path: str | None = None,
+    os_overhead_gb: float = 0.0,
 ) -> tuple[dict, dict]:
     """
     Build node timelines from a simulation run.
@@ -166,7 +167,7 @@ def run_and_extract(
 
         cfg      = load_scheduler_config(cfg_path)
         registry = InstanceRegistry.from_yaml(registry_path)
-        cooloff  = el.metadata.get('cooloff_seconds', 0.0)
+        cool_off  = el.metadata.get('cool_off_seconds', 0.0)
 
         sc, metrics = run_one(
             event_list=el,
@@ -206,11 +207,27 @@ def run_and_extract(
 
     # ── BSIM-82: per-node CPU_WASTE step functions ─────────────────────────
     # node_id → list of (t, effective_vcpu, io_ineligible, thread_count, hard_limit)
+    # (node_id, job_id) → list of (t, effective_vcpu, current_vcpu, io_ineligible, thread_count, hard_limit, remaining_cpu_s)
     node_cpu_waste: dict[str, list] = {}
+    job_cpu_waste: dict[tuple, list] = {}
     for e in log:
         if e.event_type == EventType.CPU_WASTE:
             nid = e.data.get('node_id')
-            if nid:
+            jid = e.data.get('job_id')
+            if nid and jid:
+                # Per-job event (has job_id)
+                eff = e.data.get('effective_vcpu', 0.0)
+                job_cpu_waste.setdefault((nid, jid), []).append((
+                    e.sim_time,
+                    eff,
+                    e.data.get('current_vcpu', eff),
+                    e.data.get('io_ineligible_waste', 0.0),
+                    e.data.get('thread_count_waste', 0.0),
+                    e.data.get('hard_limit_waste', 0.0),
+                    e.data.get('remaining_cpu_s', 0.0),
+                ))
+            elif nid:
+                # Node composite event (no job_id)
                 node_cpu_waste.setdefault(nid, []).append((
                     e.sim_time,
                     e.data.get('effective_vcpu', 0.0),
@@ -279,10 +296,10 @@ def run_and_extract(
             if scheduler_type == 'batch':
                 res_gb = prof.preprocess_peak_ram_gb if prof else None
             else:
-                res_gb = prof.preprocess_steady_ram_gb if prof else None
+                res_gb = prof.workhorse_hard_limit_gb if prof else None
 
-            j_soft = prof.workhorse_declared_vcpu if prof else None
-            j_hard = j_soft
+            j_soft = (prof.soft_cpu or prof.workhorse_declared_vcpu) if prof else None
+            j_hard = (prof.hard_cpu or prof.workhorse_declared_vcpu) if prof else None
 
             # BSIM-81: per-phase RAM from actual job profile
             if prof:
@@ -316,30 +333,51 @@ def run_and_extract(
                 'reserved_ram_gb': round(res_gb, 1) if res_gb else None,
                 'soft_cpu':        j_soft,
                 'hard_cpu':        j_hard,
-                'phase_ram_gb':    phase_ram,   # BSIM-81
-                'phase_vcpu':      phase_vcpu,  # BSIM-81
+                'phase_ram_gb':    phase_ram,
+                'phase_vcpu':      phase_vcpu,
+                # Per-job CPU_WASTE steps: (t, effective_vcpu, current_vcpu, io_ineligible, thread_count, hard_limit, remaining_cpu_s)
+                'cpu_waste_steps': sorted(
+                    job_cpu_waste.get((nid, jid), []), key=lambda x: x[0]
+                ),
             })
         jobs_here.sort(key=lambda j: j['start_t'])
+
+        # Compute effective_schedulable_gb from observed peak RAMs (k8s/k8splus only)
+        eff_sch_gb = None
+        spike_headroom_gb = None
+        if os_overhead_gb > 0 and scheduler_type in ('k8s', 'k8splus') and inst:
+            peak_rams_here = [
+                j['phase_ram_gb']['preprocess']
+                for j in jobs_here
+                if j.get('phase_ram_gb') and j['phase_ram_gb'].get('preprocess', 0) > 0
+            ]
+            if peak_rams_here:
+                _cap = compute_k8s_capacity(inst, peak_rams_here,
+                                            os_overhead_gb=os_overhead_gb)
+                eff_sch_gb      = round(_cap.effective_schedulable_gb, 2)
+                spike_headroom_gb = round(_cap.spike_headroom_gb, 2)
 
         node_soft = max((j.get('soft_cpu') or 0 for j in jobs_here), default=0)
         node_hard = max((j.get('hard_cpu') or 0 for j in jobs_here), default=0)
 
         node_timelines[nid] = {
-            'instance':        inst_name,
-            'ram_gb':          inst.ram_gb,
-            'vcpu':            inst.vcpu,           # BSIM-80
-            'hourly_usd':      inst.hourly_price_usd,
-            'launch_t':        launch_t,
-            'ready_t':         node_ready_time.get(nid, launch_t),
-            'term_t':          term_t,
-            'cost':            round(cost, 4),
-            'jobs':            jobs_here,
-            'soft_cpu':        node_soft if node_soft > 0 else None,
-            'hard_cpu':        node_hard if node_hard > 0 else None,
-            'reserved_ram_gb': round(max(
+            'instance':               inst_name,
+            'ram_gb':                 inst.ram_gb,
+            'vcpu':                   inst.vcpu,           # BSIM-80
+            'hourly_usd':             inst.hourly_price_usd,
+            'launch_t':               launch_t,
+            'ready_t':                node_ready_time.get(nid, launch_t),
+            'term_t':                 term_t,
+            'cost':                   round(cost, 4),
+            'jobs':                   jobs_here,
+            'soft_cpu':               node_soft if node_soft > 0 else None,
+            'hard_cpu':               node_hard if node_hard > 0 else None,
+            'reserved_ram_gb':        round(max(
                 (j.get('reserved_ram_gb') or 0 for j in jobs_here), default=0
             ), 1),
-            'cpu_waste_steps': sorted(             # BSIM-82
+            'effective_schedulable_gb': eff_sch_gb,          # None for batch
+            'spike_headroom_gb':       spike_headroom_gb,   # None for batch
+            'cpu_waste_steps':        sorted(             # BSIM-82
                 node_cpu_waste.get(nid, []), key=lambda x: x[0]
             ),
         }
@@ -412,22 +450,34 @@ def _draw_node_row(
 # BSIM-81: Event-driven pool-wide usage time series
 # ---------------------------------------------------------------------------
 
-def _build_usage_series(node_timelines: dict, sample_s: float = 60.0) -> list[dict]:
+def _build_usage_series(
+    node_timelines: dict,
+    sample_s: float = 60.0,
+    t_start: float | None = None,
+    t_end: float | None = None,
+) -> list[dict]:
     """
     Build a time series of pool-wide RAM and CPU usage at sample_s intervals.
+
+    t_start / t_end optionally constrain the sampling window (absolute sim
+    seconds).  's['t']' values in the returned list are always relative to
+    t_start so callers can multiply directly by t_scale without an offset.
 
     BSIM-81: RAM uses actual per-phase values from job profiles (phase_ram_gb).
     CPU uses per-node CPU_WASTE step functions (cpu_waste_steps) rather than
     hard-coded phase constants.
 
-    Returns list of {t, alloc_ram, used_ram, alloc_vcpu, used_vcpu, n_nodes}.
+    Returns list of {t, alloc_ram, soft_reserved_ram, used_ram,
+                        alloc_vcpu, soft_reserved_vcpu, used_vcpu, n_nodes}.
     All values are in physical units (GB, vCPU).
+    soft_reserved_* tracks the scheduler's committed soft-limit reservations so
+    charts can show: used → reserved (committed) → burst/headroom → provisioned.
     """
     if not node_timelines:
         return []
 
-    t_min = min(n['launch_t'] for n in node_timelines.values())
-    t_max = max(n['term_t']   for n in node_timelines.values())
+    t_min = t_start if t_start is not None else min(n['launch_t'] for n in node_timelines.values())
+    t_max = t_end   if t_end   is not None else max(n['term_t']   for n in node_timelines.values())
 
     # Build per-job phase RAM lookup: (nid, jid) → [(phase, t0, t1, ram_gb)]
     phase_resource: dict[tuple, list] = {}
@@ -440,8 +490,35 @@ def _build_usage_series(node_timelines: dict, sample_s: float = 60.0) -> list[di
                 segs.append((ph, t0, t1, ram))
             phase_resource[(nid, job['job_id'])] = segs
 
+    # Per-job soft-limit (= reserved_ram_gb) for spike-zone burst calculation:
+    # burst_j = max(0, preprocess_peak_j - soft_limit_j) draws from the spike pool.
+    job_soft_limit = {
+        (nid, job['job_id']): (job.get('reserved_ram_gb') or 0.0)
+        for nid, node in node_timelines.items()
+        for job in node['jobs']
+    }
+
+    # Per-job soft-limit reservation windows: (nid, start_t, end_t, ram_gb, vcpu)
+    job_reservations = [
+        (nid,
+         job['start_t'], job['end_t'],
+         job.get('reserved_ram_gb') or 0.0,
+         job.get('soft_cpu') or 0.0)
+        for nid, node in node_timelines.items()
+        for job in node['jobs']
+        if job['start_t'] < job['end_t']
+    ]
+
+    last_job_end_by_node = {
+        nid: max((j['end_t'] for j in node['jobs']), default=0.0)
+        for nid, node in node_timelines.items()
+    }
+
     def _node_effective_vcpu(nid: str, t: float) -> float:
-        """Step-function lookup of effective_vcpu from cpu_waste_steps."""
+        """Step-function lookup of effective_vcpu from cpu_waste_steps.
+        Returns 0 once all jobs on the node have finished."""
+        if t >= last_job_end_by_node.get(nid, 0.0):
+            return 0.0
         steps = node_timelines[nid].get('cpu_waste_steps', [])
         val = 0.0
         for (st, eff, *_) in steps:
@@ -460,8 +537,13 @@ def _build_usage_series(node_timelines: dict, sample_s: float = 60.0) -> list[di
         ]
         alloc_ram  = sum(n['ram_gb'] for _, n in active_nodes)
         alloc_vcpu = sum(n['vcpu']   for _, n in active_nodes)
+        pool_sch   = sum(
+            (n.get('effective_schedulable_gb') or 0.0) for _, n in active_nodes
+        )
         used_ram   = 0.0
         used_vcpu  = 0.0
+        soft_res_ram  = 0.0
+        soft_res_vcpu = 0.0
 
         active_set = {nid for nid, _ in active_nodes}
         for (nid, jid), segs in phase_resource.items():
@@ -474,13 +556,35 @@ def _build_usage_series(node_timelines: dict, sample_s: float = 60.0) -> list[di
         for nid in active_set:
             used_vcpu += _node_effective_vcpu(nid, t)
 
+        for nid, jstart, jend, jram, jcpu in job_reservations:
+            if nid in active_set and jstart <= t < jend:
+                soft_res_ram  += jram
+                soft_res_vcpu += jcpu
+
+        # Spike pool consumption: sum of (preprocess_peak - soft_limit) for all
+        # jobs currently in the preprocess phase.  These N GB are drawn from the
+        # unreservable spike headroom zone, causing its bottom edge to rise.
+        spike_consumed = 0.0
+        for (nid, jid), segs in phase_resource.items():
+            if nid not in active_set:
+                continue
+            for ph, t0, t1, ram in segs:
+                if ph == 'preprocess' and t0 <= t < t1:
+                    soft_lim = job_soft_limit.get((nid, jid), 0.0)
+                    spike_consumed += max(0.0, ram - soft_lim)
+                    break
+
         series.append({
-            't':          round(t - t_min),
-            'alloc_ram':  round(alloc_ram, 1),
-            'used_ram':   round(used_ram, 1),
-            'alloc_vcpu': round(alloc_vcpu, 1),
-            'used_vcpu':  round(used_vcpu, 1),
-            'n_nodes':    len(active_nodes),
+            't':                  round(t - t_min),
+            'alloc_ram':          round(alloc_ram, 1),
+            'pool_schedulable':   round(pool_sch, 1),
+            'soft_reserved_ram':  round(soft_res_ram, 1),
+            'used_ram':           round(used_ram, 1),
+            'spike_consumed':     round(spike_consumed, 1),
+            'alloc_vcpu':         round(alloc_vcpu, 1),
+            'soft_reserved_vcpu': round(soft_res_vcpu, 1),
+            'used_vcpu':          round(used_vcpu, 1),
+            'n_nodes':            len(active_nodes),
         })
         t += sample_s
     return series
@@ -522,6 +626,42 @@ def _draw_cpu_waste_panel(
     thrd = [s[3] for s in steps]
     hlim = [s[4] for s in steps]
 
+    # Extend the step function to cover the full node lifetime, zeroing CPU
+    # once all jobs have finished so idle tails don't ghost the last phase.
+    t_last_job_end_val = (
+        (max(j['end_t'] for j in node.get('jobs', [])) - t_min) * t_scale
+        if node.get('jobs') else 0.0
+    )
+    t_term = (node['term_t'] - t_min) * t_scale
+    # Insert a zero step at last-job-end.  With step='post' semantics the
+    # preceding step's value naturally covers [prev_t, t_last_job_end).
+    if ts and ts[-1] < t_last_job_end_val - 1e-6:
+        ts.append(t_last_job_end_val)
+        eff.append(0.0); io_w.append(0.0); thrd.append(0.0); hlim.append(0.0)
+    # Extend to node termination (value is already 0 if there was an idle tail).
+    if ts and ts[-1] < t_term - 1e-6:
+        ts.append(t_term)
+        eff.append(eff[-1]); io_w.append(io_w[-1])
+        thrd.append(thrd[-1]); hlim.append(hlim[-1])
+
+    # Soft-limit reservation step function derived from job start/end events.
+    # Built from the *original* steps list (before the termination extension),
+    # then extended to match ts length.
+    job_events = sorted(
+        [(job['start_t'], +(job.get('soft_cpu') or 0.0)) for job in node.get('jobs', [])]
+        + [(job['end_t'],  -(job.get('soft_cpu') or 0.0)) for job in node.get('jobs', [])]
+    )
+    sr_running, ei = 0.0, 0
+    sr_vals = []
+    for st, *_ in steps:
+        while ei < len(job_events) and job_events[ei][0] <= st:
+            sr_running += job_events[ei][1]
+            ei += 1
+        sr_vals.append(max(0.0, sr_running))
+    # Mirror the termination-extension applied to ts above.
+    while len(sr_vals) < len(ts):
+        sr_vals.append(sr_vals[-1] if sr_vals else 0.0)
+
     # Stacked fill_between (step='post')
     def _stack(ax, ts, bottom, top, color, label, alpha=0.8):
         ax.fill_between(ts, bottom, top,
@@ -539,6 +679,11 @@ def _draw_cpu_waste_panel(
     _stack(ax, ts, b2, b3, WASTE_COLOR['thread_count'],  'thread-count waste')
     _stack(ax, ts, b3, b4, WASTE_COLOR['hard_limit'],    'hard-limit waste (CFS)')
 
+    # Soft-limit reservation floor: dashed line showing total committed soft_cpu
+    if sr_vals:
+        ax.step(ts, sr_vals, where='post', color='#444', linewidth=1.1,
+                linestyle=':', zorder=6, label='soft-limit reservation')
+
     ax.axhline(node_vcpu, color='#555', linewidth=0.8, linestyle='--', alpha=0.5)
     ax.set_ylim(0, node_vcpu * 1.1)
     ax.set_ylabel('vCPU', fontfamily=FONT, fontsize=8)
@@ -552,48 +697,48 @@ def _draw_cpu_waste_panel(
 # Overview chart
 # ---------------------------------------------------------------------------
 
-def chart_overview(
-    node_timelines: dict,
+def _render_overview_page(
+    gantt_nodes: list,
+    all_timelines: dict,
     metadata: dict,
     out: Path,
-    scheduler_type: str = 'batch',
+    scheduler_type: str,
+    t_min: float,
+    t_max: float,
+    filename: str,
+    title_suffix: str,
+    png_only: bool = False,
 ) -> None:
-    """
-    Overview chart: all nodes.
-    Layout: Gantt (top panel) stacked above CPU/RAM usage (bottom panel).
-    BSIM-80: y-axes use absolute physical units (GB, vCPU), not percentages.
-    """
-    nodes = sorted(node_timelines.values(), key=lambda n: n['launch_t'])
-    if not nodes:
-        return
+    """Render one overview page.
 
-    t_min  = min(n['launch_t'] for n in nodes)
-    t_max  = max(n['term_t']   for n in nodes)
-    t_span = t_max - t_min
-    if t_span == 0:
-        return
-
-    n_nodes = len(nodes)
+    The Gantt panel shows only `gantt_nodes`; the pool-wide CPU/RAM panels
+    always use `all_timelines` so every page shares consistent context.
+    The x-axis is fixed to [t_min, t_max] so pages share the same scale.
+    """
+    t_span  = t_max - t_min
+    n_nodes = len(gantt_nodes)
     row_h   = max(0.35, min(0.9, 36 / n_nodes))
     gantt_h = max(4, n_nodes * row_h * 1.35 + 1.5)
-    usage_h = 2.5
+    ram_h   = 2.2
+    cpu_h   = 1.6
     fig_w   = 18
 
-    fig = plt.figure(figsize=(fig_w, gantt_h + usage_h + 0.8))
-    gs  = fig.add_gridspec(2, 1, height_ratios=[gantt_h, usage_h], hspace=0.08)
+    fig = plt.figure(figsize=(fig_w, gantt_h + ram_h + cpu_h + 0.8))
+    gs  = fig.add_gridspec(3, 1, height_ratios=[gantt_h, ram_h, cpu_h], hspace=0.06)
     ax_gantt = fig.add_subplot(gs[0])
     ax_usage = fig.add_subplot(gs[1], sharex=ax_gantt)
+    ax_cpu   = fig.add_subplot(gs[2], sharex=ax_gantt)
 
     t_scale = (fig_w - 2) / t_span
 
-    for i, node in enumerate(nodes):
+    for i, (nid, node) in enumerate(gantt_nodes):
         y = n_nodes - 1 - i
         _draw_node_row(ax_gantt, node, y, row_h, t_min, t_scale,
                        fig_w, scheduler_type=scheduler_type)
         soft = node.get('soft_cpu', '?')
         hard = node.get('hard_cpu', '?')
         ram  = node.get('reserved_ram_gb', node['ram_gb'])
-        label = (f"{node['instance']}  ${node['cost']:.2f}"
+        label = (f"{nid}  {node['instance']}  ${node['cost']:.2f}"
                  f"  ({len(node['jobs'])}j)"
                  f"  cpu:{soft}/{hard}  ram:{ram:.0f}G")
         ax_gantt.text(-0.005, y, label,
@@ -614,70 +759,199 @@ def chart_overview(
                    else 'OKD K8S+')
     ax_gantt.set_title(
         f'{sched_label} — Node Lifecycles  '
-        f'{n_nodes} nodes · {metadata["total_jobs"]} jobs · '
-        f'${metadata["total_cost"]:.2f}  '
+        f'{metadata["total_jobs"]} jobs · ${metadata["total_cost"]:.2f}'
+        f'{title_suffix}  '
         f'(left labels: instance  cost  jobs  cpu:soft/hard  ram:limit)',
         fontfamily=FONT, fontsize=9, loc='left',
     )
 
-    # ── Bottom panel: CPU and RAM (BSIM-80: absolute units) ──────────────
-    series = _build_usage_series(node_timelines, sample_s=max(60, t_span / 80))
+    # ── Bottom panels: CPU and RAM (pool-wide, BSIM-80 absolute units) ───
+    # t_start/t_end constrain the series to this page's time window so the
+    # usage panels align with the gantt and omit uncharted simulation time.
+    series = _build_usage_series(all_timelines, sample_s=max(60, t_span / 80),
+                                 t_start=t_min, t_end=t_max)
     if series:
-        ts_px     = [s['t'] * t_scale for s in series]
-        used_ram  = [s['used_ram']    for s in series]
-        alloc_ram = [s['alloc_ram']   for s in series]
-        used_cpu  = [s['used_vcpu']   for s in series]
-        alloc_cpu = [s['alloc_vcpu']  for s in series]
+        ts_px        = [s['t'] * t_scale          for s in series]
+        used_ram     = [s['used_ram']              for s in series]
+        soft_res_ram = [s['soft_reserved_ram']     for s in series]
+        alloc_ram    = [s['alloc_ram']             for s in series]
+        used_cpu     = [s['used_vcpu']             for s in series]
+        soft_res_cpu = [s['soft_reserved_vcpu']    for s in series]
+        alloc_cpu    = [s['alloc_vcpu']            for s in series]
 
         max_alloc_ram = max(alloc_ram) if alloc_ram else 1.0
         max_alloc_cpu = max(alloc_cpu) if alloc_cpu else 1.0
 
-        # RAM: absolute GB
+        pool_sch     = [s.get('pool_schedulable', 0.0) for s in series]
+        has_pool_sch = any(v > 0 for v in pool_sch)
+
+        # RAM overview stacking (bottom → top), variable-pool view:
+        #   spike consumption | normal use | soft-limit reserved | headroom | provisioned
         ax_usage.fill_between(ts_px, alloc_ram,
-                              alpha=0.25, color='#d0cec8', step='post',
+                              alpha=0.15, color='#d0cec8', step='post',
                               label=f'RAM provisioned  (peak {max_alloc_ram:.0f} GB)')
-        ax_usage.fill_between(ts_px, used_ram,
-                              alpha=0.65, color='#A32D2D', step='post',
-                              label='RAM used')
+        spike_consumed_o = [s.get('spike_consumed', 0.0) for s in series]
+        used_sch_o = [max(0.0, u - sc) for u, sc in zip(used_ram, spike_consumed_o)]
+
+        b1 = spike_consumed_o                                             # top of spike
+        b2 = [sc + u  for sc, u  in zip(b1, used_sch_o)]                 # top of normal use
+        b3 = [max(bot, sc + sr)                                           # top of reservation
+              for bot, sc, sr in zip(b2, b1, soft_res_ram)]
+
+        if has_pool_sch:
+            b4 = [max(res_top, sc + ps)                                   # top of headroom
+                  for res_top, sc, ps in zip(b3, b1, pool_sch)]
+            zeros = [0.0] * len(ts_px)
+            ax_usage.fill_between(ts_px, zeros, b1,
+                                  alpha=0.75, color='#b05a00', step='post',
+                                  label='spike pool consumed')
+            ax_usage.fill_between(ts_px, b1, b2,
+                                  alpha=0.80, color='#A32D2D', step='post',
+                                  label='RAM in use (schedulable)')
+            ax_usage.fill_between(ts_px, b2, b3,
+                                  alpha=0.50, color='#c07070', step='post',
+                                  label='RAM soft-limit reserved')
+            ax_usage.fill_between(ts_px, b3, b4,
+                                  alpha=0.40, color='#c87d10', step='post',
+                                  label='schedulable headroom')
+            ax_usage.step(ts_px, pool_sch, where='post', color='#7a4800',
+                          linewidth=0.8, linestyle='--', alpha=0.55)
+        else:
+            ax_usage.fill_between(ts_px, b1, b2,
+                                  alpha=0.80, color='#A32D2D', step='post',
+                                  label='RAM in use')
+            ax_usage.fill_between(ts_px, b2, b3,
+                                  alpha=0.50, color='#c07070', step='post',
+                                  label='RAM soft-limit reserved')
         ax_usage.set_ylabel('RAM (GB)', fontfamily=FONT, fontsize=8, color='#A32D2D')
         ax_usage.set_ylim(0, max_alloc_ram * 1.1)
         ax_usage.tick_params(axis='y', labelsize=7, colors='#A32D2D')
 
-        # CPU: absolute vCPU on twin axis
-        ax_cpu2 = ax_usage.twinx()
-        ax_cpu2.step(ts_px, alloc_cpu, color='#d0cec8', linewidth=0.8,
-                     where='post', linestyle='--', label='vCPU provisioned')
-        ax_cpu2.step(ts_px, used_cpu, color='#185FA5', linewidth=1.4,
-                     where='post', label=f'CPU effective  (peak {max(used_cpu, default=0):.0f} vCPU)')
-        ax_cpu2.set_ylabel('CPU (vCPU)', fontfamily=FONT, fontsize=8, color='#185FA5')
-        ax_cpu2.set_ylim(0, max_alloc_cpu * 1.1)
-        ax_cpu2.tick_params(axis='y', labelsize=7, colors='#185FA5')
-
         from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
-        handles = [
-            Patch(color='#d0cec8', alpha=0.5,
-                  label=f'RAM provisioned  ({max_alloc_ram:.0f} GB)'),
-            Patch(color='#A32D2D', alpha=0.65, label='RAM used'),
-            Line2D([0], [0], color='#185FA5', lw=1.4,
-                   label=f'CPU effective  (peak {max(used_cpu, default=0):.0f} vCPU)'),
-        ]
-        ax_usage.legend(handles=handles, fontsize=7, loc='upper right', framealpha=0.9)
+        ram_handles = [
+            Patch(color='#b05a00', alpha=0.80, label='spike pool consumed'),
+            Patch(color='#A32D2D', alpha=0.80, label='RAM in use (schedulable)'),
+            Patch(color='#c07070', alpha=0.55, label='RAM soft-limit reserved'),
+            Patch(color='#c87d10', alpha=0.45, label='schedulable headroom'),
+            Patch(color='#d0cec8', alpha=0.35,
+                  label=f'RAM provisioned  (peak {max_alloc_ram:.0f} GB)'),
+        ] + ([Line2D([0], [0], color='#7a4800', linewidth=1.0,
+                     linestyle='--', alpha=0.7, label='schedulable ceiling')]
+             if has_pool_sch else [])
+        ax_usage.legend(handles=ram_handles, fontsize=7, loc='upper right',
+                        framealpha=0.9, ncol=3)
         ax_usage.set_facecolor('#fafaf9')
         ax_usage.grid(True, axis='x', alpha=0.15)
+        ax_usage.tick_params(axis='x', labelbottom=False)
+
+        peak_cpu = max(used_cpu, default=0)
+        # Provisioned ceiling drawn first (background) so the unused fraction
+        # shows as light grey rather than white — mirrors the RAM panel layout.
+        ax_cpu.fill_between(ts_px, alloc_cpu,
+                            alpha=0.12, color='#888', step='post')
+        ax_cpu.fill_between(ts_px, soft_res_cpu,
+                            alpha=0.22, color='#185FA5', step='post',
+                            label='CPU soft-limit reserved')
+        ax_cpu.fill_between(ts_px, used_cpu,
+                            alpha=0.70, color='#185FA5', step='post',
+                            label=f'CPU effective  (peak {peak_cpu:.0f} vCPU)')
+        ax_cpu.step(ts_px, alloc_cpu, color='#888', linewidth=0.7,
+                    where='post', linestyle='--',
+                    label=f'CPU provisioned  (peak {max_alloc_cpu:.0f} vCPU)')
+        ax_cpu.set_ylabel('vCPU', fontfamily=FONT, fontsize=8, color='#185FA5')
+        ax_cpu.set_ylim(0, max_alloc_cpu * 1.1)
+        ax_cpu.tick_params(axis='y', labelsize=7, colors='#185FA5')
+        ax_cpu.legend(fontsize=7, loc='upper right', framealpha=0.9, ncol=3)
+        ax_cpu.set_facecolor('#fafaf9')
+        ax_cpu.grid(True, axis='x', alpha=0.15)
 
     tick_s = _nice_tick_seconds(t_span)
     ticks  = np.arange(0, t_span + tick_s, tick_s)
-    ax_usage.set_xticks(ticks * t_scale)
-    ax_usage.set_xticklabels(
+    ax_cpu.set_xticks(ticks * t_scale)
+    ax_cpu.set_xticklabels(
         [f'{t/60:.0f}m' for t in ticks], fontsize=8, fontfamily=FONT)
-    ax_usage.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
+    ax_cpu.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
 
-    fig.align_ylabels([ax_usage])
-    for ext in ('png', 'svg'):
-        fig.savefig(out / f'overview.{ext}', dpi=130, bbox_inches='tight')
+    fig.align_ylabels([ax_usage, ax_cpu])
+    exts = ('png',) if png_only else ('png', 'svg')
+    for ext in exts:
+        fig.savefig(out / f'{filename}.{ext}', dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f'  overview.{{png,svg}}  ({n_nodes} nodes)')
+    ext_label = 'png' if png_only else 'png,svg'
+    print(f'  {filename}.{{{ext_label}}}  ({n_nodes} nodes)')
+
+
+def chart_overview(
+    node_timelines: dict,
+    metadata: dict,
+    out: Path,
+    scheduler_type: str = 'batch',
+) -> None:
+    """
+    Overview chart: all nodes.
+    Layout: Gantt (top) stacked above CPU/RAM usage (bottom).
+
+    When more nodes exist than fit at MAX_GANTT_H:
+      overview.png       — summary, top max_rows nodes by cost
+      overview_p01..pN.png — full-coverage pages, all nodes by launch time,
+                             max_rows per page, pool-wide metrics on every page
+    """
+    nodes_by_launch = sorted(node_timelines.items(), key=lambda x: x[1]['launch_t'])
+    if not nodes_by_launch:
+        return
+
+    t_min = min(n['launch_t'] for _, n in nodes_by_launch)
+    t_max = max(n['term_t']   for _, n in nodes_by_launch)
+    if t_max == t_min:
+        return
+
+    n_total  = len(nodes_by_launch)
+    row_h    = max(0.35, min(0.9, 36 / n_total))
+    MAX_GANTT_H = 80.0
+    max_rows = max(1, int((MAX_GANTT_H - 1.5) / (row_h * 1.35)))
+
+    # Summary overview — top max_rows by cost, or all nodes when they fit
+    if n_total <= max_rows:
+        summary_nodes = nodes_by_launch
+        title_suffix  = ''
+    else:
+        summary_nodes = sorted(nodes_by_launch,
+                               key=lambda x: x[1]['cost'], reverse=True)[:max_rows]
+        title_suffix  = f'  [top {max_rows} of {n_total} by cost]'
+
+    _render_overview_page(
+        gantt_nodes=summary_nodes, all_timelines=node_timelines,
+        metadata=metadata, out=out, scheduler_type=scheduler_type,
+        t_min=t_min, t_max=t_max,
+        filename='overview', title_suffix=title_suffix,
+        png_only=(n_total > 120),
+    )
+
+    # Paginated full-coverage overviews (only when truncation was needed)
+    if n_total > max_rows:
+        n_pages = (n_total + max_rows - 1) // max_rows
+        for pi in range(n_pages):
+            start      = pi * max_rows
+            end        = min(start + max_rows, n_total)
+            page_nodes = nodes_by_launch[start:end]
+            # Time bounds for this page: earliest launch → latest termination
+            # of the nodes shown.  The x-axis stretches to fill the gantt width
+            # so shorter windows give wider bars and better readability.
+            page_t_min = min(n['launch_t'] for _, n in page_nodes)
+            page_t_max = max(n['term_t']   for _, n in page_nodes)
+            _render_overview_page(
+                gantt_nodes=page_nodes,
+                all_timelines=node_timelines,
+                metadata=metadata, out=out, scheduler_type=scheduler_type,
+                t_min=page_t_min, t_max=page_t_max,
+                filename=f'overview_p{pi + 1:02d}',
+                title_suffix=(f'  [p{pi + 1}/{n_pages}'
+                              f'  nodes {start + 1}–{end} of {n_total}]'),
+                png_only=True,
+            )
+        print(f'  overview_p01..p{n_pages:02d}.png'
+              f'  ({n_pages} pages × up to {max_rows} nodes/page)')
 
 
 # ---------------------------------------------------------------------------
@@ -807,45 +1081,70 @@ def chart_per_node(
     series  = _build_usage_series(node_tl, sample_s=max(10, t_span / 60))
 
     if series:
-        ts_px    = [s['t'] * t_scale for s in series]
-        used_ram = [s['used_ram']    for s in series]
-        alloc_ram= [s['alloc_ram']   for s in series]
-        used_cpu = [s['used_vcpu']   for s in series]
+        ts_px     = [s['t'] * t_scale          for s in series]
+        used_ram  = [s['used_ram']              for s in series]
+        soft_res  = [s['soft_reserved_ram']     for s in series]
+        alloc_ram = [s['alloc_ram']             for s in series]
+        eff_sch   = node.get('effective_schedulable_gb')   # None for batch
 
-        # RAM: absolute GB, ceiling = node's physical RAM
+        # Layer 1: provisioned ceiling (background)
         ax_usage.fill_between(ts_px, alloc_ram,
-                              alpha=0.25, color='#d0cec8', step='post',
+                              alpha=0.18, color='#d0cec8', step='post',
                               label=f'RAM provisioned  ({node_ram_gb:.0f} GB)')
-        ax_usage.fill_between(ts_px, used_ram,
-                              alpha=0.65, color='#A32D2D', step='post',
-                              label='RAM used')
-        ax_usage.axhline(node_ram_gb, color='#A32D2D', linewidth=0.8,
+        spike_consumed_s = [s.get('spike_consumed', 0.0) for s in series]
+        # Schedulable-zone usage = actual RAM minus the burst drawn from the spike
+        # pool; keeps the dark-red fill below eff_sch and avoids double-counting
+        # the burst in both the used_ram region and the spike-consumed region.
+        used_sch = [max(0.0, u - sc) for u, sc in zip(used_ram, spike_consumed_s)]
+
+        # Layer 2 (k8s/k8splus): schedulable headroom [soft_res, eff_sch].
+        # Shows space still available for additional soft-limit reservations.
+        if eff_sch is not None and eff_sch > 0:
+            amber_bot = [min(s, eff_sch) for s in soft_res]
+            ax_usage.fill_between(ts_px, amber_bot, [eff_sch] * len(ts_px),
+                                  alpha=0.38, color='#c87d10', step='post',
+                                  label='schedulable headroom')
+        # Layer 3: soft-limit reservations [0, soft_res]
+        ax_usage.fill_between(ts_px, soft_res,
+                              alpha=0.45, color='#c07070', step='post',
+                              label='soft-limit reserved')
+        # Layer 4: schedulable-zone RAM in use (burst excluded — shown in spike zone)
+        ax_usage.fill_between(ts_px, used_sch,
+                              alpha=0.80, color='#A32D2D', step='post',
+                              label='RAM in use (schedulable zone)')
+        # Layers 5+6 (k8s/k8splus): spike headroom pool [eff_sch, node_ram_gb].
+        # Layer 5: consumed portion [eff_sch, eff_sch + spike_consumed] — drawn
+        #   in a warm amber so it reads as "pool in use, not yet returned."
+        # Layer 6: available portion [eff_sch + spike_consumed, node_ram_gb] —
+        #   hatched grey; its bottom edge rises as the semaphore is acquired and
+        #   drops back when the preprocess burst is released.
+        spike_gb = node.get('spike_headroom_gb')
+        if eff_sch is not None and eff_sch > 0 and spike_gb is not None:
+            spike_top = [min(eff_sch + sc, eff_sch + spike_gb)
+                         for sc in spike_consumed_s]
+            spike_ceil = eff_sch + spike_gb          # top of spike pool
+            os_gb = node_ram_gb - spike_ceil         # actual OS overhead
+            ax_usage.fill_between(ts_px,
+                                  [eff_sch] * len(ts_px), spike_top,
+                                  alpha=0.65, color='#b05a00', step='post',
+                                  label=f'spike pool consumed (preprocess burst)')
+            ax_usage.fill_between(ts_px,
+                                  spike_top, [spike_ceil] * len(ts_px),
+                                  alpha=0.28, color='#b8b8b8', step='post',
+                                  hatch='///', edgecolor='#888888', linewidth=0.3,
+                                  label=f'spike pool available  ({spike_gb:.0f} GB = max preload)')
+            # OS overhead cap — always present, distinct from spike pool
+            ax_usage.axhspan(spike_ceil, node_ram_gb,
+                             facecolor='#909090', alpha=0.55,
+                             label=f'OS overhead  ({os_gb:.0f} GB)')
+            ax_usage.axhline(eff_sch, color='#555', linewidth=1.2,
+                             linestyle='--', alpha=0.75)
+        ax_usage.axhline(node_ram_gb, color='#888', linewidth=0.7,
                          linestyle='--', alpha=0.4)
         ax_usage.set_ylabel('RAM (GB)', fontfamily=FONT, fontsize=8, color='#A32D2D')
         ax_usage.set_ylim(0, node_ram_gb * 1.05)
         ax_usage.tick_params(axis='y', labelsize=7, colors='#A32D2D')
-
-        # CPU: absolute vCPU, ceiling = node's physical vCPU count
-        ax_cpu2 = ax_usage.twinx()
-        ax_cpu2.step(ts_px, used_cpu, color='#185FA5', linewidth=1.4,
-                     where='post',
-                     label=f'CPU effective  (peak {max(used_cpu, default=0):.1f} vCPU)')
-        ax_cpu2.axhline(node_vcpu, color='#185FA5', linewidth=0.8,
-                        linestyle='--', alpha=0.4)
-        ax_cpu2.set_ylabel('CPU (vCPU)', fontfamily=FONT, fontsize=8, color='#185FA5')
-        ax_cpu2.set_ylim(0, node_vcpu * 1.05)
-        ax_cpu2.tick_params(axis='y', labelsize=7, colors='#185FA5')
-
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
-        handles = [
-            Patch(color='#d0cec8', alpha=0.5,
-                  label=f'RAM provisioned  ({node_ram_gb:.0f} GB)'),
-            Patch(color='#A32D2D', alpha=0.65, label='RAM used'),
-            Line2D([0], [0], color='#185FA5', lw=1.4,
-                   label=f'CPU effective  (peak {max(used_cpu, default=0):.1f} vCPU)'),
-        ]
-        ax_usage.legend(handles=handles, fontsize=7, loc='upper right', framealpha=0.9)
+        ax_usage.legend(fontsize=7, loc='upper right', framealpha=0.9)
         ax_usage.set_facecolor('#fafaf9')
         ax_usage.grid(True, axis='x', alpha=0.18)
 
@@ -937,6 +1236,11 @@ def main() -> None:
     else:
         print(f'[re-run path]  Re-running {args.scheduler} via run_one()...')
 
+    os_overhead_gb = 0.0
+    if args.scheduler in ('k8s', 'k8splus'):
+        _sch_cfg = load_scheduler_config(args.scheduler_config)
+        os_overhead_gb = getattr(_sch_cfg, 'k8s_os_overhead_gb', 0.0)
+
     node_timelines, metadata = run_and_extract(
         event_list_path=args.events,
         scheduler_type=args.scheduler,
@@ -944,6 +1248,7 @@ def main() -> None:
         registry_path=args.registry,
         seed=args.seed,
         event_log_path=args.event_log,
+        os_overhead_gb=os_overhead_gb,
     )
     print(f'  {metadata["total_nodes"]} nodes  '
           f'{metadata["total_jobs"]} jobs  '
