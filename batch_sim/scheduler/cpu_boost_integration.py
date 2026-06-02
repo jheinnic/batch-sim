@@ -16,6 +16,8 @@ Called at:
 
 from __future__ import annotations
 
+from typing import Any
+
 from batch_sim.metrics.collector import MetricsCollector, EventType, SimEvent
 from batch_sim.scheduler.cpu_boost_solver import (
     JobCPUState, solve_cpu_boost, NodeCPUResult
@@ -23,15 +25,27 @@ from batch_sim.scheduler.cpu_boost_solver import (
 from batch_sim.core.engine import NodeModel
 
 
-def _get_stage_io_wait(slot) -> float:
+def _get_stage_io_wait(slot: Any) -> float:
     """
     Return the io_wait fraction for the job's current phase.
-    Only workhorse stages have meaningful io_wait; other phases
-    are network or single-thread bound and do not compete for CPU.
+
+    Non-workhorse phases (download, preprocess, upload) are single-threaded
+    even though the job holds a multi-vCPU soft_cpu reservation.  Returning
+    0.0 here would tell the Option-2 solver "this job is maximally CPU-
+    efficient" and give it first priority for surplus, starving workhorse
+    jobs of boost allocation while the download/upload job can only use 1
+    thread anyway.
+
+    Instead we model non-workhorse phases with io_wait = 1 - 1/soft_cpu,
+    reflecting that only 1 of soft_cpu declared threads is actually active.
+    This correctly deprioritises them in the surplus auction without
+    removing their base soft allocation.
     """
     from batch_sim.metrics.collector import PhaseID
     if slot.current_phase != PhaseID.WORKHORSE:
-        return 0.0
+        job = slot.job
+        soft = max(1, getattr(job, 'soft_cpu', 0) or 1)
+        return 1.0 - 1.0 / soft
     # Use the stage-level io_wait if available via the job spec
     job = slot.job
     if hasattr(job, 'profile') and job.profile.stages:
@@ -49,7 +63,7 @@ def _get_stage_io_wait(slot) -> float:
     return 0.0
 
 
-def _get_stage_threads(slot) -> int:
+def _get_stage_threads(slot: Any) -> int:
     """Return declared thread count for the job's current phase."""
     from batch_sim.metrics.collector import PhaseID
     if slot.current_phase == PhaseID.WORKHORSE:
@@ -60,7 +74,7 @@ def _get_stage_threads(slot) -> int:
 
 
 def run_cpu_boost_k8s(
-    env,
+    env: Any,
     node: NodeModel,
     metrics: MetricsCollector,
     scheduler_type: str = 'k8s',
@@ -92,8 +106,7 @@ def run_cpu_boost_k8s(
 
     result = solve_cpu_boost(jobs_state, int(node.physical_vcpu))
 
-    # Write effective_vcpu back into each slot so the dynamic stage timer can
-    # read the new allocation, then fire the cpu_change_event to wake the timer.
+    # Write effective_vcpu back, fire cpu_change_events, and emit per-job CPU_WASTE.
     for slot, js in zip(slots, result.jobs):
         slot.effective_vcpu = js.effective_vcpu
         evt = slot.cpu_change_event
@@ -101,11 +114,29 @@ def run_cpu_boost_k8s(
             slot.cpu_change_event = None
             evt.succeed()
 
+        thread_ceil = getattr(js, 'stage_threads', 0) or js.hard_cpu
+        per_job_thread_waste = max(0.0, js.boost_alloc - thread_ceil) * (1.0 - js.io_wait)
+        vcpu_cap = slot.stage_vcpu_cap if slot.stage_vcpu_cap > 0 else js.effective_vcpu
+        current_vcpu = min(js.effective_vcpu, vcpu_cap)
+        metrics.record(SimEvent(EventType.CPU_WASTE, env.now, {
+            'job_id':              js.job_id,
+            'node_id':             node.node_id,
+            'scheduler':           scheduler_type,
+            'phase':               slot.current_phase.value,
+            'effective_vcpu':      round(js.effective_vcpu, 3),
+            'current_vcpu':        round(current_vcpu, 3),
+            'boost_alloc':         round(js.boost_alloc, 3),
+            'io_ineligible_waste': round(js.boost_alloc * js.io_wait, 3),
+            'thread_count_waste':  round(per_job_thread_waste, 3),
+            'hard_limit_waste':    0.0,
+            'remaining_cpu_s':     round(slot.remaining_cpu_s, 3),
+        }))
+
     _emit_cpu_waste(env, node, result, metrics, scheduler_type)
 
 
 def run_cpu_boost_batch(
-    env,
+    env: Any,
     node: NodeModel,
     metrics: MetricsCollector,
 ) -> None:
@@ -175,7 +206,7 @@ def run_cpu_boost_batch(
     thread_waste_total = sum(j.thread_waste for j in jobs)
     effective_total    = sum(j.effective_vcpu for j in jobs)
 
-    # Write effective_vcpu back into each slot and wake the dynamic stage timer.
+    # Write effective_vcpu back, fire cpu_change_events, and emit per-job CPU_WASTE.
     for slot, bj in zip(slots, jobs):
         slot.effective_vcpu = bj.effective_vcpu
         evt = slot.cpu_change_event
@@ -183,33 +214,46 @@ def run_cpu_boost_batch(
             slot.cpu_change_event = None
             evt.succeed()
 
-    # Batch has no io_ineligible_waste (CFS redistributes implicitly)
-    # and no hard_limit_waste (no quota ceiling)
+        vcpu_cap = slot.stage_vcpu_cap if slot.stage_vcpu_cap > 0 else bj.effective_vcpu
+        current_vcpu = min(bj.effective_vcpu, vcpu_cap)
+        metrics.record(SimEvent(EventType.CPU_WASTE, env.now, {
+            'job_id':              bj.job_id,
+            'node_id':             node.node_id,
+            'scheduler':           'batch',
+            'phase':               slot.current_phase.value,
+            'effective_vcpu':      round(bj.effective_vcpu, 3),
+            'current_vcpu':        round(current_vcpu, 3),
+            'boost_alloc':         round(bj.boost_alloc, 3),
+            'io_ineligible_waste': round(bj.boost_alloc * bj.io_wait, 3),
+            'thread_count_waste':  round(bj.thread_waste, 3),
+            'hard_limit_waste':    0.0,
+            'remaining_cpu_s':     round(slot.remaining_cpu_s, 3),
+        }))
+
+    # Node-level composite (no job_id → node scope)
     metrics.record(SimEvent(EventType.CPU_WASTE, env.now, {
         'node_id':             node.node_id,
         'scheduler':           'batch',
         'job_count':           len(jobs),
         'effective_vcpu':      round(effective_total, 3),
         'thread_count_waste':  round(thread_waste_total, 3),
-        'io_ineligible_waste': 0.0,   # not applicable for Batch (CFS redistributes)
-        'hard_limit_waste':    0.0,   # not applicable for Batch (no quota)
+        'io_ineligible_waste': 0.0,
+        'hard_limit_waste':    0.0,
         'total_waste':         round(thread_waste_total, 3),
     }))
 
 
 def _emit_cpu_waste(
-    env,
+    env: Any,
     node: NodeModel,
     result: NodeCPUResult,
     metrics: MetricsCollector,
     scheduler_type: str,
 ) -> None:
-    """Emit a CPU_WASTE event from a NodeCPUResult."""
-    # Thread count waste: cycles allocated above stage thread count
+    """Emit a node-level composite CPU_WASTE event (no job_id → node scope)."""
     thread_waste = sum(
-        max(0.0, j.boost_alloc - getattr(j, 'stage_threads', j.hard_cpu)) * (1.0 - j.io_wait)
+        max(0.0, j.boost_alloc - (getattr(j, 'stage_threads', 0) or j.hard_cpu)) * (1.0 - j.io_wait)
         for j in result.jobs
-        if hasattr(j, 'stage_threads')
     )
 
     metrics.record(SimEvent(EventType.CPU_WASTE, env.now, {

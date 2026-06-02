@@ -143,6 +143,241 @@ centroids:
 
 ---
 
+## BSIM-92 — Schema: discriminated union for Pareto vs bin sizing model
+
+**Type:** Task | **Priority:** Low | **Status:** To Do
+**Depends on:** BSIM-75, BSIM-76
+
+**Background:**
+After BSIM-75/76 shipped, `CentroidConfig` supports two mutually exclusive
+sizing paths — Pareto multiplier and discrete bins — but expresses them as a
+single flat struct with all fields present simultaneously.  When `centroid_bin_weights`
+is set, the Pareto fields (`pareto_alpha`, `download_gb`,
+`preprocess_memory_exponent_a/b`, `preprocess_duration_seconds`, `upload_gb`)
+are required by the schema but never read by the sampler.  Authors using the
+bin model must supply plausible-looking placeholder values to satisfy the
+validator, which is misleading and a maintenance hazard.
+
+A second naming inconsistency: the base centroid field is `arrival_rate_per_hour`
+but its per-window override is `burst_rate` on `TimeWindowOverride`.  They are
+the same quantity (burst events per hour) and should share a name.
+
+**Design:**
+
+Replace the flat `CentroidConfig` with a discriminated union:
+
+```python
+class CentroidBase(BaseModel):
+    """Fields shared by both sizing models."""
+    id: str
+    label: str
+    description: str = ""
+    sizing_model: Literal["pareto", "bins"]   # discriminator
+    arrival_rate_per_hour: PositiveFloat
+    burst_size_min: int = 1
+    burst_size_max: int = 1
+    arrival_spacing: Literal["poisson", "approximate"] = "poisson"
+    workhorse_cpu_stages: list[PositiveFloat]
+    workhorse_soft_vcpu: list[int] | None = None
+    workhorse_hard_vcpu: list[int]
+    workhorse_io_wait_per_stage: list[Fraction] | None = None
+    io_wait_fraction: Fraction
+    time_windows: list[TimeWindowOverride] | None = None
+
+class ParetoCentroidConfig(CentroidBase):
+    sizing_model: Literal["pareto"] = "pareto"
+    pareto_alpha: PositiveFloat
+    pareto_multiplier_min: float = 0.25
+    pareto_multiplier_max: float = 4.0
+    download_gb: PositiveFloat
+    preprocess_memory_exponent_a: PositiveFloat
+    preprocess_memory_exponent_b: PositiveFloat
+    preprocess_duration_seconds: PositiveFloat
+    upload_gb: PositiveFloat
+
+class BinCentroidConfig(CentroidBase):
+    sizing_model: Literal["bins"] = "bins"
+    centroid_bin_weights: list[PositiveFloat]
+    bin_download_gb: list[PositiveFloat] | None = None
+    bin_upload_gb: list[PositiveFloat] | None = None
+    bin_preprocess_duration_s: list[PositiveFloat] | None = None
+    bin_preloader_hard_limit_gb: list[PositiveFloat] | None = None
+    bin_preloader_actual_gb: list[list[float]] | None = None
+    bin_steady_state_hard_limit_gb: list[PositiveFloat] | None = None
+    bin_steady_state_actual_gb: list[list[float]] | None = None
+    bin_workhorse_scale: list[PositiveFloat] | None = None
+
+CentroidConfig = Annotated[
+    ParetoCentroidConfig | BinCentroidConfig,
+    Field(discriminator="sizing_model"),
+]
+```
+
+Also rename `TimeWindowOverride.burst_rate` → `arrival_rate_per_hour` to match
+the base centroid field.
+
+**Backward compatibility:**
+- Existing YAML configs omitting `sizing_model` should default to `"pareto"` so
+  no existing file breaks.  Pydantic v2 supports a default discriminator value.
+- `burst_rate` on `TimeWindowOverride` should be accepted as a deprecated alias
+  for one release cycle, with a logged warning on load.
+
+**Migration:**
+- All configs under `configs/` updated to declare `sizing_model: bins` or
+  `sizing_model: pareto` explicitly.
+- `demo_centroids.yaml` updated to drop placeholder Pareto fields from the
+  `heavy` centroid.
+
+**Acceptance Criteria:**
+- `BinCentroidConfig` rejects `pareto_alpha` and accepts no placeholder Pareto
+  fields; validation error names the offending field
+- `ParetoCentroidConfig` rejects `centroid_bin_weights`
+- Existing configs without `sizing_model` load as `ParetoCentroidConfig`
+- `TimeWindowOverride.arrival_rate_per_hour` accepted; `burst_rate` logs a
+  deprecation warning and is treated as an alias
+- All existing config files in `configs/` validate under the new schema
+- Sampler dispatch (`sample_job`) uses `isinstance` check or the discriminator
+  field rather than `centroid.centroid_bin_weights is not None`
+
+---
+
+## BSIM-93 — Schema + sampler: per-bin workhorse stage definitions
+
+**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Depends on:** BSIM-92 (discriminated union)
+
+**Background:**
+The original bin model design called for fully independent workhorse stage
+definitions per bin — each bin specifying its own stage count, CPU-seconds per
+stage, thread ceilings, and I/O wait fractions.  What shipped in BSIM-75/76
+was a weaker approximation: a single `bin_workhorse_scale` scalar that
+proportionally stretches a shared `workhorse_cpu_stages` template, with thread
+counts fixed per centroid and not binnable at all.  This prevents modelling
+workloads where different declared memory sizes have meaningfully different
+compute shapes (e.g. a small bin with one short parallel stage vs. a large bin
+with two long parallel stages with different parallelism ceilings).
+
+**Intended YAML format:**
+
+```yaml
+sizing_model: bins
+centroid_bin_weights: [3, 2]   # 2 bins
+
+# Per-bin list-of-lists; outer index = bin, inner list = stage definitions
+workhorse_cpu_stages:        [[1200, 50], [800, 60, 1400, 40]]
+workhorse_soft_vcpu:         [[2],        [4, 4]]
+workhorse_hard_vcpu:         [[16],       [8, 16]]
+workhorse_io_wait_per_stage: [[0.15],     [0.05, 0.15]]
+```
+
+Each inner list follows the existing flat-list convention: `workhorse_cpu_stages`
+alternates parallel and sequential stage CPU-seconds; `workhorse_soft_vcpu` and
+`workhorse_hard_vcpu` have one entry per parallel stage (i.e. half the length
+of the corresponding cpu_stages inner list).
+
+**Schema changes:**
+
+`io_wait_fraction` is eliminated entirely.  `workhorse_io_wait_per_stage`
+becomes the single field for I/O wait on both paths, accepting a flexible
+nested structure that broadcasts from coarser to finer resolution:
+
+```
+Pareto path — Fraction | list[Fraction]
+  0.15                     → all stages: 15%
+  [0.30, 0.10]             → stage 0: 30%, stage 1: 10%
+
+Bin path — Fraction | list[Fraction | list[Fraction]]
+  0.15                     → every stage in every bin: 15%
+  [0.15, [0.05, 0.15]]     → bin 0 all stages: 15%;
+                              bin 1 stage 0: 5%, stage 1: 15%
+  [[0.10, 0.20],            → bin 0 stage 0: 10%, stage 1: 20%;
+   [0.05, 0.15]]               bin 1 stage 0: 5%, stage 1: 15%
+```
+
+Broadcast rules applied at sample time:
+- If the top-level value is a scalar: broadcast to all bins × all stages.
+- If the top-level value is a list (length = num bins): resolve each element:
+    - Scalar element: broadcast to all stages in that bin.
+    - List element: one value per parallel stage in that bin (length must match).
+
+`BinCentroidConfig` workhorse fields (list-of-lists, outer = bin):
+
+```python
+workhorse_cpu_stages:        list[list[PositiveFloat]]
+workhorse_soft_vcpu:         list[list[int]] | None = None
+workhorse_hard_vcpu:         list[list[int]]
+workhorse_io_wait_per_stage: Fraction | list[Fraction | list[Fraction]]
+```
+
+`CentroidBase` retains flat-list versions of the workhorse fields for the
+Pareto path, with `workhorse_io_wait_per_stage` typed as
+`Fraction | list[Fraction]`.  `io_wait_fraction` is removed from `CentroidBase`.
+
+**Validation (BinCentroidConfig):**
+- Outer length of all per-bin workhorse arrays must equal `len(centroid_bin_weights)`
+- For each bin `i`: `len(workhorse_cpu_stages[i])` must be even (alternating
+  parallel/sequential pairs)
+- For each bin `i`: `len(workhorse_soft_vcpu[i])` and
+  `len(workhorse_hard_vcpu[i])` must equal `len(workhorse_cpu_stages[i]) // 2`
+- `soft_vcpu[i][j] <= hard_vcpu[i][j]` for all bins `i` and stages `j`
+- If `workhorse_io_wait_per_stage` is a list (not scalar): length must equal
+  `len(centroid_bin_weights)`; each list element that is itself a list must
+  have length equal to `len(workhorse_cpu_stages[i]) // 2` for its bin `i`
+- `bin_workhorse_scale` is removed from `BinCentroidConfig`; its presence in a
+  config file is a validation error
+- `io_wait_fraction` is removed from both config classes; its presence in a
+  config file is a validation error
+
+**Sampler changes:**
+In `_sample_job_bin_mode`, replace:
+```python
+scale = _get(centroid.bin_workhorse_scale, 1.0)
+cpu_stages = [s * scale for s in centroid.workhorse_cpu_stages]
+hard_vcpu = list(centroid.workhorse_hard_vcpu)
+```
+with:
+```python
+cpu_stages = centroid.workhorse_cpu_stages[bin_idx]
+hard_vcpu  = centroid.workhorse_hard_vcpu[bin_idx]
+soft_vcpu  = (centroid.workhorse_soft_vcpu[bin_idx]
+              if centroid.workhorse_soft_vcpu else None)
+io_waits   = _resolve_io_wait(centroid.workhorse_io_wait_per_stage,
+                              bin_idx, n_stages=len(cpu_stages) // 2)
+```
+
+Where `_resolve_io_wait` applies the broadcast rules:
+```python
+def _resolve_io_wait(spec, bin_idx, n_stages):
+    if isinstance(spec, float):          # scalar → broadcast everywhere
+        return [spec] * n_stages
+    per_bin = spec[bin_idx]
+    if isinstance(per_bin, float):       # per-bin scalar → broadcast within bin
+        return [per_bin] * n_stages
+    return list(per_bin)                 # explicit per-stage list
+```
+
+**Migration:**
+- `demo_centroids.yaml` and any other bin-model configs updated to use
+  list-of-lists form for the workhorse fields
+- `bin_workhorse_scale` removed from those configs
+
+**Acceptance Criteria:**
+- Bin 0 and bin 1 produce jobs with the correct stage count, cpu-seconds,
+  thread ceilings, and I/O wait fractions for their respective definitions
+- All three `workhorse_io_wait_per_stage` forms (scalar, per-bin scalar list,
+  per-bin per-stage list) produce the correct resolved value at sample time
+- Validation catches inner-list length mismatches with a message naming the
+  bin index and the offending field
+- `soft_vcpu > hard_vcpu` rejected at validation time
+- Pareto path (`ParetoCentroidConfig`) continues to use flat lists and is
+  unaffected by this change; scalar `workhorse_io_wait_per_stage` also accepted
+  on the Pareto path and broadcasts to all stages
+- `bin_workhorse_scale` in a bin-model config raises a clear validation error
+- `io_wait_fraction` in any config raises a clear validation error directing the
+  author to use `workhorse_io_wait_per_stage` instead
+
+---
+
 ## BSIM-78 — Generator: piecewise-constant Poisson with window boundary crossing
 
 **Type:** Task | **Priority:** Medium | **Status:** To Do
@@ -173,3 +408,51 @@ Bin weight lookup uses the same window resolution as the rate lookup.
   (KS test, p > 0.05, over 1000 simulated windows)
 - Bin weight distribution switches correctly at window boundaries (verified by
   inspecting per-window job size histograms)
+
+---
+
+## BSIM-94 — K8S scheduler: configurable memory reservation fraction below workhorse hard limit
+
+**Type:** Story | **Priority:** Medium | **Status:** To Do
+
+**Background:**
+The current baseline uses `bin_steady_state_hard_limit_gb` (the developer-declared
+workhorse memory cap) as the K8S `resources.requests.memory` for scheduling placement.
+Combined with the preload semaphore, this guarantees zero crash probability: even if
+every job draws its maximum steady-state RAM simultaneously, total node consumption
+cannot exceed physical capacity.
+
+In practice, actual workhorse RAM draw (`bin_steady_state_actual_gb`) is typically well
+below the declared hard limit (e.g. actual P95 ≈ 60-70% of the hard limit). This leaves
+substantial schedulable headroom untapped. By reserving less than the full hard limit,
+more jobs can be placed on each node, reducing cost — at the price of a small,
+configurable crash probability.
+
+**Goal:**
+Add a `memory_reservation_fraction` parameter (float, default `1.0`) to
+`SchedulerConfig` (and/or per-centroid pool config for K8S+). When less than 1.0, the
+scheduler uses `reservation = memory_reservation_fraction × workhorse_hard_limit_gb`
+as the memory request for bin-packing purposes, while retaining the full hard limit
+for the actual pod spec `limits.memory`.
+
+**Design sketch:**
+```yaml
+scheduler:
+  memory_reservation_fraction: 0.7   # reserve 70% of hard limit → ~40% more jobs/node
+```
+
+The K8S+ placement logic in `_place_job` (and `compute_k8s_capacity`) should read this
+fraction when computing `effective_schedulable_gb` and per-job RAM reservation. The
+workhorse hard limit itself is unchanged in the job spec — only the scheduling signal
+is discounted.
+
+**Acceptance Criteria:**
+- `memory_reservation_fraction = 1.0` reproduces current (BSIM-94 baseline) behavior
+- Metrics include `crash_count` (node OOM events) alongside the usual cost/throughput
+- Simulation output clearly annotates what fraction was configured
+- At least one reference run at fraction = 0.7 with crash rate vs cost trade-off noted
+
+**Risk:**
+At fractions below ~0.6, crash probability rises sharply when actual draw clusters
+near the hard limit. A follow-on story should derive the analytically safe fraction from
+the `bin_steady_state_actual_gb` distribution (e.g. reserve at P99 of actual draw).

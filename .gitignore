@@ -9,3 +9,4 @@ build/
 results/*/
 workloads/*.json
 !workloads/.gitkeep
+results/

@@ -1,0 +1,58 @@
+# configs/demo_k8splus_schedulerC.yaml
+# K8S+ scheduler with Karpenter-style workload-reactive provisioner.
+#
+# Replaces the 258-line time-window policy in schedulerB.yaml with a
+# 10-field provisioner block.  Instance sizing and node lifecycle both
+# react to observed queue depth and utilisation — no calendar rules.
+#
+# Instance selection (scale-out):
+#   For every node that must be launched, the provisioner scores each
+#   allowed type by (jobs-that-fit / hourly-rate) against the live queue
+#   and picks the highest-scoring type.  Under heavy load this upsizes
+#   naturally to large bin-packing instances; during quiet periods it
+#   downsizes to the cheapest single-job fit.
+#
+# Node lifecycle (three orthogonal TTLs):
+#   empty_ttl_s          — terminate 30 s after the last job leaves
+#   underutilize_ttl_s   — drain after 4 min below 25 % vCPU utilisation
+#   max_node_ttl_s       — hard 45-min lifetime cap (Karpenter expireAfter)
+#
+# Consolidation:
+#   After each job completes, if a node drops below 30 % utilisation AND
+#   its remaining jobs fit on another ready node, it enters DRAINING
+#   immediately rather than waiting for a TTL.
+#
+# Instance registry: configs/instance_registry.yaml
+#   Covers c7i / m7i / r7i families from xlarge through 16xlarge.
+
+scheduler_type: k8splus
+panic_threshold_seconds: 600
+sla_target_seconds: 300
+warmup_delay_seconds: 60
+idle_timeout_seconds: 300
+k8s_os_overhead_gb: 2.0
+
+# Demand-based scale-out: only provision when a job has waited at least
+# 90 s, polled every 30 s — avoids thrashing on transient micro-bursts.
+scale_out_threshold_s: 90
+scale_out_poll_s: 30
+
+provisioner:
+  allowed_instance_types:
+    - c7i.4xlarge    #  16 vCPU  30 GB sch   $0.714/hr  — light jobs ≤16 GB
+    - c7i.8xlarge    #  32 vCPU  62 GB sch   $1.428/hr  — light jobs ≤32 GB
+    - c7i.16xlarge   #  64 vCPU  126 GB sch  $2.856/hr  — many light jobs
+    - m7i.4xlarge    #  16 vCPU  62 GB sch   $0.806/hr  — medium jobs ≤64 GB
+    - m7i.8xlarge    #  32 vCPU  126 GB sch  $1.613/hr  — medium jobs ≤128 GB
+    - m7i.16xlarge   #  64 vCPU  254 GB sch  $3.226/hr  — many medium jobs
+    - r7i.4xlarge    #  16 vCPU  126 GB sch  $1.008/hr  — heavy jobs ≤128 GB
+    - r7i.8xlarge    #  32 vCPU  254 GB sch  $2.016/hr  — heavy jobs ≤256 GB
+
+  # Node lifecycle TTLs
+  empty_ttl_s: 30              # terminate 30 s after node empties
+  underutilize_threshold_pct: 25.0   # below 25 % vCPU utilisation → timer starts
+  underutilize_ttl_s: 240      # drain after 4 min underutilised with jobs
+  max_node_ttl_s: 2700         # hard 45-min lifetime cap
+
+  # Active consolidation
+  consolidation_threshold_pct: 30.0  # consolidate if < 30 % utilised post-job

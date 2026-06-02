@@ -1,0 +1,331 @@
+# configs/demo_centroids.yaml
+# Two-centroid demo showcasing E14 features (BSIM-74/75/77):
+#   - Discrete size-bin job model (centroid_bin_weights + bin_* arrays)
+#   - Per-centroid time-window arrival overrides (time_windows)
+#   - Explicit arrival_spacing selection
+#
+# Pair with configs/demo_k8splus_scheduler.yaml for E16 (time-window policy)
+# and E17 (demand-based provisioning) coverage.
+#
+# Instance registry: configs/jch_instance_registry_01.yaml
+#   c7i.16xlarge  128 GB  64 vCPU  $2.856/hr   <- Band 1 (light jobs, preload <= 32 GB)
+#   m7i.16xlarge  256 GB  64 vCPU  $3.226/hr   <- Band 2 (heavy jobs, preload >  32 GB)
+
+horizon_seconds: 86400      # 8-hour simulation window
+random_seed: 8217
+cool_off_seconds: 3600       # 30-min tail; in-flight jobs finish after horizon
+network_bandwidth_mbps: 10000
+
+centroids:
+
+  # ── light: Small analytics jobs, 3 size bins ──────────────────────────────
+  # bin_preloader_hard_limit_gb: [8, 16, 32] GB
+  # All three bins route to Band 1 (compute queue, c7i.16xlarge):
+  #   max preload 32 GB << inclusive_max_gb 32 GB boundary in scheduler.
+  # Arrival rate and size mix shift at the 4-hour mark (time_windows).
+  - id: light
+    label: "Light Analytics"
+    description: >
+      Short analytics jobs declared in three memory sizes (8/16/32 GB).
+      Arrival rate halves overnight then ramps above baseline at 04:00.
+      Size mix skews small overnight, shifts toward larger bins in the morning.
+
+    # Required base fields; used as fallback if bin arrays are absent and
+    # by build_phase_profile before bin overrides are applied.
+    arrival_rate_per_hour: 24.0
+    pareto_alpha: 2.5
+    download_gb: 8.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.2
+    preprocess_duration_seconds: 30
+    io_wait_fraction: 0.20
+    upload_gb: 2.0
+
+    # Burst sizing: 1–3 same-type jobs per deploy event
+    burst_size_min: 3
+    burst_size_max: 12
+
+    # E14 / BSIM-74: reduced-variance inter-arrival spacing.
+    # Use "approximate" for predictable test runs; "poisson" (default) for
+    # realistic burst clustering.
+    arrival_spacing: poisson
+
+    # E14 / BSIM-75: discrete size-bin model.
+    # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    centroid_bin_weights:           [5, 3, 2]   # normalises to CDF [0.50, 0.80, 1.00]
+    bin_download_gb:                [16, 24, 32]
+    bin_upload_gb:                  [16, 24, 32]
+    bin_preprocess_duration_s:      [20, 30, 40]
+    bin_preloader_hard_limit_gb:    [24, 32, 46]       # K8S RAM limit for preload phase
+    bin_preloader_actual_gb:        [[14, 23], [20, 31], [28, 45]]  # uniform draw [lo, hi]
+    bin_steady_state_hard_limit_gb: [4, 8, 12]        # K8S RAM limit for workhorse phase
+    bin_steady_state_actual_gb:     [[2, 4], [4, 8], [7, 11]]
+    bin_workhorse_scale:            [0.8, 1.0, 1.25]  # small=half duration; large=2x nominal
+
+    # CPU: 2 parallel stages with distinct I/O profiles.
+    # E17 / BSIM-87: effective_vcpu is computed dynamically each stage by the
+    # cpu_boost solver and drives the stage timer — no extra config needed.
+    workhorse_cpu_stages:         [120, 15, 180, 15]
+    workhorse_soft_vcpu:          [2, 2]   # K8S CPU request (scheduler packs by this)
+    workhorse_hard_vcpu:          [8, 8]   # burst ceiling = physical thread count per stage
+    workhorse_io_wait_per_stage:  [0.12, 0.14]
+
+    # E14 / BSIM-77: per-centroid time-window overrides.
+    # Gaps outside these windows use the centroid baseline (4 bursts/hr, weights [5,3,2]).
+    time_windows:
+      - start_time_s: 0          # 00:00 – 04:00: quiet overnight
+        end_time_s: 14400
+        burst_rate: 4.0          # 0.5x baseline
+        centroid_bin_weights: [59, 20, 1]   # 70% small overnight
+      - start_time_s: 14400      # 04:00 – 08:00: morning ramp
+        end_time_s: 28800
+        burst_rate: 9.6          # 1.5x baseline
+        centroid_bin_weights: [1, 2, 7]   # shift toward medium + large
+      - start_time_s: 28800          # 08:00 – 12:00: quiet overnight
+        end_time_s: 43200
+        burst_rate: 28.0          # 0.5x baseline
+        centroid_bin_weights: [7, 2, 1]   # 70% small overnight
+      - start_time_s: 43200      # 12:00 – 16:00: morning ramp
+        end_time_s: 57600
+        burst_rate: 16.0          # 1.5x baseline
+        centroid_bin_weights: [3, 4, 1]   # shift toward medium + large
+      - start_time_s: 57600          # 16:00 – 20:00: quiet overnight
+        end_time_s: 82000
+        burst_rate: 24.0          # 0.5x baseline
+        centroid_bin_weights: [2, 3, 1]   # 70% small overnight
+      - start_time_s: 82000      # 20:00 – 24:00: morning ramp
+        end_time_s: 86400
+        burst_rate: 14.0          # 1.5x baseline
+        centroid_bin_weights: [1, 29, 70]   # shift toward medium + large
+
+
+  # ── heavy: Memory-intensive transform jobs, 2 size bins ───────────────────
+  # bin_preloader_hard_limit_gb: [64, 128] GB
+  # Both bins route to Band 2 (memory queue, m7i.16xlarge):
+  #   min preload 64 GB > exclusive_min_gb 32 GB boundary in scheduler.
+  # Constant arrival rate — no time_windows defined.
+  - id: heavy
+    label: "Heavy Transform"
+    description: >
+      Long-running memory-intensive transform jobs in two declared tiers
+      (64 GB and 128 GB preload limit).  Arrival rate is constant throughout
+      the simulation; size mix is 60% medium / 40% large.
+
+    # Required base fields
+    arrival_rate_per_hour: 1.5
+    pareto_alpha: 2.0
+    download_gb: 30.0
+    preprocess_memory_exponent_a: 1.0
+    preprocess_memory_exponent_b: 1.0
+    preprocess_duration_seconds: 45
+    io_wait_fraction: 0.10
+    upload_gb: 4.0
+
+    # Burst sizing: 2–5 jobs per deploy event
+    burst_size_min: 2
+    burst_size_max: 10
+
+    # E14 / BSIM-74: exact memoryless Poisson (default; shown explicitly for clarity)
+    arrival_spacing: poisson
+
+    # E14 / BSIM-75: discrete size-bin model
+    centroid_bin_weights:           [3, 2]     # normalises to CDF [0.60, 1.00]
+    bin_download_gb:                [28, 42]
+    bin_upload_gb:                  [6, 10]
+    bin_preprocess_duration_s:      [40, 60]
+    bin_preloader_hard_limit_gb:    [32, 46]
+    bin_preloader_actual_gb:        [[20, 31], [30, 46]]
+    bin_steady_state_hard_limit_gb: [18, 24]
+    bin_steady_state_actual_gb:     [[10, 18], [18, 24]]
+    bin_workhorse_scale:            [1.0, 1.3]
+
+    # CPU: 2 parallel stages, mostly compute-bound (low io_wait)
+    workhorse_cpu_stages:         [800, 60, 600, 40]
+    workhorse_soft_vcpu:          [4, 4]
+    workhorse_hard_vcpu:          [12, 12]
+    workhorse_io_wait_per_stage:  [0.08, 0.08]
+
+    # E14 / BSIM-77: per-centroid time-window overrides.
+    # Gaps outside these windows use the centroid baseline (4 bursts/hr, weights [5,3,2]).
+    time_windows:
+      - start_time_s: 0          # 00:00 – 04:00: quiet overnight
+        end_time_s: 14400
+        burst_rate: 1.2          # 0.5x baseline
+        centroid_bin_weights: [4, 1]   # 70% small overnight
+      - start_time_s: 14400      # 04:00 – 08:00: morning ramp
+        end_time_s: 28800
+        burst_rate: 7.2          # 1.5x baseline
+        centroid_bin_weights: [2, 1]   # shift toward medium + large
+      - start_time_s: 28800          # 08:00 – 12:00: quiet overnight
+        end_time_s: 43200
+        burst_rate: 42.0          # 0.5x baseline
+        centroid_bin_weights: [1, 1]   # 70% small overnight
+      - start_time_s: 43200      # 12:00 – 16:00: morning ramp
+        end_time_s: 57600
+        burst_rate: 20.0          # 1.5x baseline
+        centroid_bin_weights: [1, 4]   # shift toward medium + large
+      - start_time_s: 57600          # 16:00 – 20:00: quiet overnight
+        end_time_s: 82000
+        burst_rate: 36.0          # 0.5x baseline
+        centroid_bin_weights: [1, 1]   # 70% small overnight
+      - start_time_s: 82000      # 20:00 – 24:00: morning ramp
+        end_time_s: 86400
+        burst_rate: 8.2        # 1.5x baseline
+        centroid_bin_weights: [3, 2]   # 70% small overnight
+  # ── light: Small analytics jobs, 3 size bins ──────────────────────────────
+  # bin_preloader_hard_limit_gb: [8, 16, 32] GB
+  # All three bins route to Band 1 (compute queue, c7i.16xlarge):
+  #   max preload 32 GB << inclusive_max_gb 32 GB boundary in scheduler.
+  # Arrival rate and size mix shift at the 4-hour mark (time_windows).
+  - id: wham
+    label: "Hit n Burn"
+    description: >
+      Short analytics jobs declared in three memory sizes (8/16/32 GB).
+      Arrival rate halves overnight then ramps above baseline at 04:00.
+      Size mix skews small overnight, shifts toward larger bins in the morning.
+
+    # Required base fields; used as fallback if bin arrays are absent and
+    # by build_phase_profile before bin overrides are applied.
+    arrival_rate_per_hour: 24.0
+    pareto_alpha: 2.5
+    download_gb: 8.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.2
+    preprocess_duration_seconds: 30
+    io_wait_fraction: 0.20
+    upload_gb: 2.0
+
+    # Burst sizing: 1–3 same-type jobs per deploy event
+    burst_size_min: 5
+    burst_size_max: 20
+
+    # E14 / BSIM-74: reduced-variance inter-arrival spacing.
+    # Use "approximate" for predictable test runs; "poisson" (default) for
+    # realistic burst clustering.
+    arrival_spacing: poisson
+
+    # E14 / BSIM-75: discrete size-bin model.
+    # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    centroid_bin_weights:           [5, 3]   # normalises to CDF [0.50, 0.80, 1.00]
+    bin_download_gb:                [64, 64]
+    bin_upload_gb:                  [32, 48]
+    bin_preprocess_duration_s:      [20, 30]
+    bin_preloader_hard_limit_gb:    [92, 92]       # K8S RAM limit for preload phase
+    bin_preloader_actual_gb:        [[36, 72], [44, 88]]  # uniform draw [lo, hi]
+    bin_steady_state_hard_limit_gb: [3, 4]        # K8S RAM limit for workhorse phase
+    bin_steady_state_actual_gb:     [[1.4, 2.9], [1.8, 3.8]]
+    bin_workhorse_scale:            [1.2, 1.0]  # small=half duration; large=2x nominal
+
+    # CPU: 2 parallel stages with distinct I/O profiles.
+    # E17 / BSIM-87: effective_vcpu is computed dynamically each stage by the
+    # cpu_boost solver and drives the stage timer — no extra config needed.
+    workhorse_cpu_stages:         [600, 10, 1000, 10, 400, 10]
+    workhorse_soft_vcpu:          [1, 1, 1]   # K8S CPU request (scheduler packs by this)
+    workhorse_hard_vcpu:          [8, 16, 8]   # burst ceiling = physical thread count per stage
+    workhorse_io_wait_per_stage:  [0.05, 0.10, 0.03]
+
+    # E14 / BSIM-77: per-centroid time-window overrides.
+    # Gaps outside these windows use the centroid baseline (4 bursts/hr, weights [5,3,2]).
+    time_windows:
+      - start_time_s: 0          # 00:00 – 04:00: quiet overnight
+        end_time_s: 14400
+        burst_rate: 6.4          # 0.5x baseline
+        centroid_bin_weights: [3, 2]   # 70% small overnight
+      - start_time_s: 14400      # 04:00 – 08:00: morning ramp
+        end_time_s: 28800
+        burst_rate: 20.0          # 1.5x baseline
+        centroid_bin_weights: [3, 2]   # shift toward medium + large
+      - start_time_s: 28800          # 08:00 – 12:00: quiet overnight
+        end_time_s: 43200
+        burst_rate: 46.0          # 0.5x baseline
+        centroid_bin_weights: [7, 2]   # 70% small overnight
+      - start_time_s: 43200      # 12:00 – 16:00: morning ramp
+        end_time_s: 57600
+        burst_rate: 25.0          # 1.5x baseline
+        centroid_bin_weights: [3, 4]   # shift toward medium + large
+      - start_time_s: 57600          # 16:00 – 20:00: quiet overnight
+        end_time_s: 82000
+        burst_rate: 20.0          # 0.5x baseline
+        centroid_bin_weights: [2, 5]   # 70% small overnight
+      - start_time_s: 82000      # 20:00 – 24:00: morning ramp
+        end_time_s: 86400
+        burst_rate: 2.2          # 1.5x baseline
+        centroid_bin_weights: [1, 1]   # shift toward medium + large
+  # ── light: Small analytics jobs, 3 size bins ──────────────────────────────
+  # bin_preloader_hard_limit_gb: [8, 16, 32] GB
+  # All three bins route to Band 1 (compute queue, c7i.16xlarge):
+  #   max preload 32 GB << inclusive_max_gb 32 GB boundary in scheduler.
+  # Arrival rate and size mix shift at the 4-hour mark (time_windows).
+  - id: data
+    label: "DataHeavy"
+    description: >
+      Short analytics jobs declared in three memory sizes (8/16/32 GB).
+      Arrival rate halves overnight then ramps above baseline at 04:00.
+      Size mix skews small overnight, shifts toward larger bins in the morning.
+
+    # Required base fields; used as fallback if bin arrays are absent and
+    # by build_phase_profile before bin overrides are applied.
+    arrival_rate_per_hour: 40.0
+    pareto_alpha: 2.5
+    download_gb: 8.0
+    preprocess_memory_exponent_a: 1.5
+    preprocess_memory_exponent_b: 1.2
+    preprocess_duration_seconds: 30
+    io_wait_fraction: 0.20
+    upload_gb: 2.0
+
+    # Burst sizing: 1–3 same-type jobs per deploy event
+    burst_size_min: 4
+    burst_size_max: 8
+
+    # E14 / BSIM-74: reduced-variance inter-arrival spacing.
+    # Use "approximate" for predictable test runs; "poisson" (default) for
+    # realistic burst clustering.
+    arrival_spacing: poisson
+
+    # E14 / BSIM-75: discrete size-bin model.
+    # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    centroid_bin_weights:           [2, 3, 5, 3, 1]   # normalises to CDF [0.50, 0.80, 1.00]
+    bin_download_gb:                [8, 8, 64, 512, 512]
+    bin_upload_gb:                  [8, 512, 64, 8, 512]
+    bin_preprocess_duration_s:      [10, 10, 20, 40, 40]
+    bin_preloader_hard_limit_gb:    [12, 24, 32, 32, 62]       # K8S RAM limit for preload phase
+    bin_preloader_actual_gb:        [[6, 12], [14, 24], [22, 30], [24, 32], [48, 60]]  # uniform draw [lo, hi]
+    bin_steady_state_hard_limit_gb: [6, 10, 8, 10, 16]        # K8S RAM limit for workhorse phase
+    bin_steady_state_actual_gb:     [[3, 6], [6, 10], [4, 8], [6, 10], [8, 14]]
+    bin_workhorse_scale:            [1.0, 1.0, 1.0, 1.0, 1.0]  # small=half duration; large=2x nominal
+
+    # CPU: 2 parallel stages with distinct I/O profiles.
+    # E17 / BSIM-87: effective_vcpu is computed dynamically each stage by the
+    # cpu_boost solver and drives the stage timer — no extra config needed.
+    workhorse_cpu_stages:         [90, 30, 90, 30]
+    workhorse_soft_vcpu:          [2, 2]   # K8S CPU request (scheduler packs by this)
+    workhorse_hard_vcpu:          [12, 12]   # burst ceiling = physical thread count per stage
+    workhorse_io_wait_per_stage:  [0.08, 0.08]
+
+    time_windows:
+      - start_time_s: 0          # 00:00 – 04:00: quiet overnight
+        end_time_s: 14400
+        burst_rate: 2.0          # 0.5x baseline
+        centroid_bin_weights: [2, 1, 4, 1, 1]   # 70% small overnight
+      - start_time_s: 14400      # 04:00 – 08:00: morning ramp
+        end_time_s: 28800
+        burst_rate: 6.4          # 1.5x baseline
+        centroid_bin_weights: [2, 1, 4, 2, 1]   # shift toward medium + large
+      - start_time_s: 28800          # 08:00 – 12:00: quiet overnight
+        end_time_s: 43200
+        burst_rate: 18.0          # 0.5x baseline
+        centroid_bin_weights: [4, 1, 5, 1, 3]   # 70% small overnight
+      - start_time_s: 43200      # 12:00 – 16:00: morning ramp
+        end_time_s: 57600
+        burst_rate: 24.0          # 1.5x baseline
+        centroid_bin_weights: [2, 1, 3, 1, 5]   # shift toward medium + large
+      - start_time_s: 57600          # 16:00 – 20:00: quiet overnight
+        end_time_s: 82000
+        burst_rate: 32.0          # 0.5x baseline
+        centroid_bin_weights: [1, 1, 2, 1, 4]   # 70% small overnight
+      - start_time_s: 82000      # 20:00 – 24:00: morning ramp
+        end_time_s: 86400
+        burst_rate: 9.6          # 1.5x baseline
+        centroid_bin_weights: [1, 1, 2, 1, 2]   # shift toward medium + large
+

@@ -110,7 +110,11 @@ def solve_cpu_boost(
     remaining_surplus = surplus
     for job in sorted_jobs:
         headroom = job.hard_cpu - job.soft_cpu
-        grant    = min(headroom, max(0.0, remaining_surplus))
+        # Cap grant so boost_alloc never exceeds the node's physical vCPU.
+        # Without this, a solo job's own io_wait soft-returns inflate the
+        # surplus and recycle back to the same job, producing boost_alloc > physical.
+        max_physical_headroom = max(0.0, node_physical_vcpu - job.soft_cpu)
+        grant    = min(headroom, max(0.0, remaining_surplus), max_physical_headroom)
         job.boost_alloc    = job.soft_cpu + grant
         job.effective_vcpu = job.boost_alloc * (1.0 - job.io_wait)
         # Option 2: do NOT add grant * io_wait back to surplus

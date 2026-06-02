@@ -85,11 +85,12 @@ def _sample_job_bin_mode(
             profile.preprocess_steady_ram_gb = 0.08 * hard_limit
 
     if centroid.bin_steady_state_hard_limit_gb is not None:
-        profile.workhorse_ram_gb = centroid.bin_steady_state_hard_limit_gb[bin_idx]
+        profile.workhorse_hard_limit_gb = centroid.bin_steady_state_hard_limit_gb[bin_idx]
         if centroid.bin_steady_state_actual_gb is not None:
             lo, hi = centroid.bin_steady_state_actual_gb[bin_idx]
-            # stored in workhorse_ram_gb; hard limit tracked separately if needed
             profile.workhorse_ram_gb = float(rng.uniform(lo, hi))
+        else:
+            profile.workhorse_ram_gb = profile.workhorse_hard_limit_gb
 
     soft_cpu = (max(centroid.workhorse_soft_vcpu) if centroid.workhorse_soft_vcpu
                 else profile.workhorse_declared_vcpu)

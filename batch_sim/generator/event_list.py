@@ -120,8 +120,9 @@ class JobArrivalEvent:
     workhorse_ram_gb: float
     upload_duration_s: float
     upload_ram_gb: float
-    soft_cpu: int = 0   # BSIM-69: K8S soft limit (scheduler reservation)
-    hard_cpu: int = 0   # BSIM-69: K8S hard limit (burst ceiling = thread count)
+    soft_cpu: int = 0       # BSIM-69: K8S soft limit (scheduler reservation)
+    hard_cpu: int = 0       # BSIM-69: K8S hard limit (burst ceiling = thread count)
+    workhorse_hard_limit_gb: float = 0.0  # bin_steady_state_hard_limit_gb → K8S memory request
 
     def to_job_spec(self) -> JobSpec:
         stages = [
@@ -142,6 +143,7 @@ class JobArrivalEvent:
             workhorse_duration_s=self.workhorse_duration_s,
             workhorse_peak_vcpu=self.workhorse_peak_vcpu,
             workhorse_declared_vcpu=self.workhorse_declared_vcpu,
+            workhorse_hard_limit_gb=self.workhorse_hard_limit_gb,
             workhorse_ram_gb=self.workhorse_ram_gb,
             upload_duration_s=self.upload_duration_s,
             upload_ram_gb=self.upload_ram_gb,
@@ -167,6 +169,7 @@ def _event_from_job(arrival_time, job):
         workhorse_duration_s=p.workhorse_duration_s,
         workhorse_peak_vcpu=p.workhorse_peak_vcpu,
         workhorse_declared_vcpu=p.workhorse_declared_vcpu,
+        workhorse_hard_limit_gb=p.workhorse_hard_limit_gb,
         workhorse_ram_gb=p.workhorse_ram_gb,
         upload_duration_s=p.upload_duration_s, upload_ram_gb=p.upload_ram_gb,
         soft_cpu=job.soft_cpu, hard_cpu=job.hard_cpu,
@@ -207,7 +210,7 @@ def build_event_list(config: SimulationConfig) -> EventList:
         "network_bandwidth_mbps": config.network_bandwidth_mbps,
         "centroid_ids": [c.id for c in config.centroids],
         "total_jobs": len(events),
-        "cooloff_seconds": config.cooloff_seconds,
+        "cool_off_seconds": config.cool_off_seconds,
         "burst_params": {
             c.id: {"min": c.burst_size_min, "max": c.burst_size_max}
             for c in config.centroids

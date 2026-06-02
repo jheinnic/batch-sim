@@ -24,7 +24,7 @@ reports "0 jobs on 0 nodes" even though `run_one()` returns a non-zero scorecard
 all_node_ids = set(node_launch_time.keys()) & set(node_term_time.keys())
 ```
 Nodes that have not yet terminated are silently excluded. With a short workload +
-cooloff, `env.run(until=...)` may fire before idle timers expire, leaving all nodes
+cool_off, `env.run(until=...)` may fire before idle timers expire, leaving all nodes
 alive at sim end with no `NODE_TERMINATED` event.
 
 **Investigation targets:**
@@ -124,3 +124,79 @@ Layer boundaries come from the `cause` field on each event.
 - Reference jch workload shows non-zero yellow waste for K8S+ (expected: returned
   cycles from io_wait-heavy jobs that cannot be redistributed)
 - Panel is skipped gracefully if no CPU_WASTE events are present in the log
+
+---
+
+## BSIM-95 — Bug: CPU_WASTE remaining_cpu_s is stale within workhorse iterations
+
+**Type:** Bug | **Priority:** Medium | **Status:** To Do
+**Depends on:** BSIM-82
+
+**Description:**
+`slot.remaining_cpu_s` is set to the iteration-starting value at the **top** of the
+workhorse inner while loop, but external `cpu_boost` calls (triggered by other jobs'
+phase transitions) read this field in the **same SimPy step** that fires the
+`cpu_change_event` — before the yield returns and before elapsed time has been
+subtracted.  The slot's remaining is only decremented after the yield completes, in
+the next SimPy step.
+
+```python
+# engine.py — workhorse inner loop (simplified):
+while remaining_cpu_s > 1e-9:
+    slot.remaining_cpu_s = remaining_cpu_s   # ← written: iteration-start value
+    slot.stage_t0 = env.now
+    yield env.timeout(remaining_cpu_s / current_vcpu) | cpu_evt
+    # ↑ cpu_boost fires HERE (same step as evt.succeed()), reads stale remaining
+    elapsed = env.now - stage_t0
+    remaining_cpu_s -= elapsed * current_vcpu  # ← actual decrement: one step too late
+```
+
+Every `CPU_WASTE` event therefore reports `remaining_cpu_s` as it stood at the
+**start of the current iteration**, not at `env.now`.  Consumers that compute progress
+by diffing consecutive `remaining_cpu_s` values receive the progress from the
+*previous* iteration attributed to the *current* window — off by one iteration.
+
+**Observed symptom (from manual AUC analysis, `time_scrap_decomp.ods`):**
+A 60-second window near end of Stage A reported implied vCPU of 15.87 (expected 7.60);
+the adjacent window showed 2.30.  The excess in one window exactly equalled the deficit
+in the other.  The 150 CPU-second figure appearing as "progress" in the final Stage A
+window matched the incoming Stage B budget — the stage-start reset of `remaining_cpu_s`
+being visible as a phantom progress spike to the diff consumer.
+
+**Root cause (confirmed from engine.py):**
+`slot.remaining_cpu_s` is set at the top of each while iteration and read by
+`run_cpu_boost_k8s` during the **same** SimPy step that fires `cpu_change_event`
+(via `evt.succeed()`).  The yield unblocks one step later; only then is the slot
+decremented.  `cpu_boost` therefore always sees the stale start-of-iteration value.
+
+**Fix — add `stage_t0` to `RunningJobSlot`:**
+
+```python
+# engine.py RunningJobSlot — new field:
+stage_t0: float = 0.0
+
+# engine.py inner loop — set alongside remaining_cpu_s:
+slot.remaining_cpu_s = remaining_cpu_s
+slot.stage_t0 = env.now          # ← new: iteration-start timestamp
+
+# cpu_boost_integration.py run_cpu_boost_k8s — replace raw slot read:
+actual_remaining = max(0.0,
+    slot.remaining_cpu_s
+    - (env.now - getattr(slot, 'stage_t0', env.now)) * slot.effective_vcpu
+)
+# emit actual_remaining instead of slot.remaining_cpu_s
+```
+
+This computes the true remaining at `env.now` using the elapsed time since the
+iteration started, without requiring any diff across events.
+
+**Acceptance Criteria:**
+- `RunningJobSlot` has `stage_t0: float = 0.0`; set in the inner workhorse loop
+- `run_cpu_boost_k8s` and `run_cpu_boost_batch` use `actual_remaining` formula above
+- For any window mid-iteration: `actual_remaining ≈ slot.remaining_cpu_s - elapsed × effective_vcpu`
+  to within floating-point tolerance
+- The phantom stage-budget spikes no longer appear in `remaining_cpu_s` diffs
+- Chart AUC reconstruction (generate_node_timelines.py) produces per-window vCPU
+  values matching the expected stage effective_vcpu for the job in `time_scrap_decomp.ods`
+- Regression: no change to simulation output (scorecard cost, job counts) — this is
+  a reporting-only fix; `slot.remaining_cpu_s` is read-only by the boost solver

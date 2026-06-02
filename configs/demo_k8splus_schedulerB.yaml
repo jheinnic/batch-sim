@@ -1,0 +1,257 @@
+# configs/demo_k8splus_scheduler.yaml
+# K8S+ scheduler configuration paired with configs/demo_centroids.yaml.
+# Demonstrates:
+#   E16 (BSIM-83/84/85): time-window scheduling policy — memory-band queues,
+#                          per-queue spawn rates, and monotone drain rules that
+#                          vary in aggressiveness by time of day.
+#   E17 (BSIM-86): demand-based provisioning — scale_out_threshold_s and
+#                   scale_out_poll_s delay node launches until queue pressure
+#                   has persisted long enough to justify the cost.
+#   E17 (BSIM-87): dynamic workhorse stage timing driven by cpu_boost solver
+#                   is automatic (no config knobs required).
+#
+# Instance registry: configs/jch_instance_registry_01.yaml
+#   c7i.16xlarge  128 GB  64 vCPU  $2.856/hr
+#   m7i.16xlarge  256 GB  64 vCPU  $3.226/hr
+#
+# Memory bands (based on preprocess_peak_ram_gb = bin_preloader_hard_limit_gb):
+#   Band 1: (0, 32] GB  → c7i.16xlarge  (light centroid: 8/16/32 GB bins)
+#   Band 2: (32, 256] GB → m7i.16xlarge  (heavy centroid: 64/128 GB bins)
+#
+# Packing headroom per instance (physical_ram = ram_gb - k8s_os_overhead_gb = X - 2):
+#   c7i.16xlarge: 126 GB physical → up to 3 light jobs at the 32 GB bin
+#   m7i.16xlarge: 254 GB physical → 3 heavy jobs at 64 GB, 1 job at 128 GB
+#
+# Three time windows:
+#   00:00 – 04:00 (0     – 14400 s)  off-peak:  slow spawn, aggressive drain
+#   04:00 – 08:00 (14400 – 28800 s)  morning:   medium spawn, moderate drain
+#   08:00 – 24:00 (28800 – 86400 s)  daytime:   fast spawn, relaxed drain
+#
+# Drain rule monotonicity (required by schema):
+#   Higher idle_vcpu threshold → strictly shorter duration_s.
+#   32+ idle = node is roughly half-empty (2 of ~3-4 jobs finished).
+#   56+ idle = node is nearly empty (1 job or none remaining on 64-vCPU node).
+
+scheduler_type: k8splus
+panic_threshold_seconds: 600
+sla_target_seconds: 300
+warmup_delay_seconds: 60
+idle_timeout_seconds: 300
+idle_check_interval_seconds: 30
+max_retries: 3
+replay_delay_seconds: 30
+k8s_os_overhead_gb: 2.0
+
+# E17 / BSIM-86: demand-based provisioning.
+# A new node is only launched if a job has been waiting at least 90 s AND the
+# scale-out monitor (polling every 30 s) confirms the queue is still non-empty.
+# This avoids spawning for transient bursts that bin-packing resolves on its own.
+scale_out_threshold_s: 90
+scale_out_poll_s: 30
+
+# E16 / BSIM-83: time-window scheduling policy.
+# Must cover 0 – 86400 s exactly (24-hour day); policy persists even when
+# the simulation horizon is shorter than 24 h.
+time_window_policy:
+
+  # ── 00:00 – 04:00: off-peak ──────────────────────────────────────────────
+  # Low arrival rate: spawn slowly, drain aggressively to avoid idle spend.
+  - start_time_s: 0
+    end_time_s: 14400
+    queues:
+      - exclusive_min_gb: 0
+        inclusive_max_gb: 16
+        spawn_instance_class: c7i.4xlarge
+        spawn_rate_per_min: 0.5        # one node per 2 min max
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 10 mins
+            duration_s: 2800
+          - idle_vcpu: 2             # 1/4 idle: drain after 5 mins
+            duration_s: 240
+          - idle_vcpu: 9             # >= half idle: drain after 3 min
+            duration_s: 42
+          - idle_vcpu: 15             # empty: drain after 18 s
+            duration_s: 15
+      - exclusive_min_gb: 16
+        inclusive_max_gb: 32
+        spawn_instance_class: c7i.8xlarge
+        spawn_rate_per_min: 0.5        # one node per 2 min max
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 10 mins
+            duration_s: 2800
+          - idle_vcpu: 2             # 1/4 idle: drain after 5 mins
+            duration_s: 240
+          - idle_vcpu: 16             # >= half idle: drain after 3 min
+            duration_s: 72
+          - idle_vcpu: 28             # nearly empty: drain after 1 min
+            duration_s: 34
+          - idle_vcpu: 32             # empty: drain after 18 s
+            duration_s: 10
+      - exclusive_min_gb: 32
+        inclusive_max_gb: 256
+        spawn_instance_class: r7i.8xlarge
+        spawn_rate_per_min: 0.2       # heavy queue: one node per 5 min max
+        drain_rules:
+          - idle_vcpu: 0
+            duration_s: 1800
+          - idle_vcpu: 2
+            duration_s: 180
+          - idle_vcpu: 16
+            duration_s: 72
+          - idle_vcpu: 24
+            duration_s: 32
+          - idle_vcpu: 32
+            duration_s: 10
+
+  # ── 04:00 – 08:00: morning ramp ──────────────────────────────────────────
+  # Arrival rate picking up: moderate spawn, hold nodes a bit longer since
+  # more work is about to arrive.
+  - start_time_s: 14400
+    end_time_s: 28800
+    queues:
+      - exclusive_min_gb: 0
+        inclusive_max_gb: 32
+        spawn_instance_class: m7i.8xlarge
+        spawn_rate_per_min: 1.0
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 15 mins
+            duration_s: 2400
+          - idle_vcpu: 2              # >= half idle: drain after 8 minSSSSSSSSSSSSSSSSS
+            duration_s: 400
+          - idle_vcpu: 16              # >= half idle: drain after 4 min
+            duration_s: 200
+          - idle_vcpu: 24              # nearly empty: drain after 1.5 min
+            duration_s: 90
+          - idle_vcpu: 32              # empty: drain after 30 s
+            duration_s: 30
+      - exclusive_min_gb: 32
+        inclusive_max_gb: 256
+        spawn_instance_class: r7i.8xlarge
+        spawn_rate_per_min: 0.5
+        drain_rules:
+          - idle_vcpu: 0
+            duration_s: 900
+          - idle_vcpu: 12
+            duration_s: 420
+          - idle_vcpu: 24
+            duration_s: 90
+          - idle_vcpu: 32
+            duration_s: 24
+
+  # ── 08:00 – 17:00: daytime peak ──────────────────────────────────────────
+  # Full load: fast spawn to keep SLA, relaxed drain to avoid churn.
+  - start_time_s: 28800
+    end_time_s: 61200
+    queues:
+      - exclusive_min_gb: 0
+        inclusive_max_gb: 32
+        spawn_instance_class: c7i.16xlarge
+        spawn_rate_per_min: 2.0        # one node per 30 s max
+        drain_rules:
+          - idle_vcpu: 16
+            duration_s: 1800           # keep nodes alive — sustained load expected
+          - idle_vcpu: 32
+            duration_s: 600
+          - idle_vcpu: 48              # nearly empty: drain after 1.5 min
+            duration_s: 90
+          - idle_vcpu: 64              # empty: drain after 30 s
+            duration_s: 36
+      - exclusive_min_gb: 32
+        inclusive_max_gb: 256
+        spawn_instance_class: m7i.16xlarge
+        spawn_rate_per_min: 1.0       # one node per 1 min max
+        drain_rules:
+          - idle_vcpu: 16
+            duration_s: 1800
+          - idle_vcpu: 32
+            duration_s: 720
+          - idle_vcpu: 48
+            duration_s: 240
+          - idle_vcpu: 64
+            duration_s: 30
+
+  # ── 17:00 – 21:00: morning ramp ──────────────────────────────────────────
+  # Arrival rate picking up: moderate spawn, hold nodes a bit longer since
+  # more work is about to arrive.
+  - start_time_s: 61200
+    end_time_s: 75600
+    queues:
+      - exclusive_min_gb: 0
+        inclusive_max_gb: 32
+        spawn_instance_class: c7i.16xlarge
+        spawn_rate_per_min: 1.0
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 15 mins
+            duration_s: 1200
+          - idle_vcpu: 16              # max lifespan: drain after 15 mins
+            duration_s: 900
+          - idle_vcpu: 32              # >= half idle: drain after 7 min
+            duration_s: 360
+          - idle_vcpu: 48              # nearly empty: drain after 1.5 min
+            duration_s: 120
+          - idle_vcpu: 64              # empty: drain after 30 s
+            duration_s: 30
+      - exclusive_min_gb: 32
+        inclusive_max_gb: 256
+        spawn_instance_class: r7i.8xlarge
+        spawn_rate_per_min: 0.5
+        drain_rules:
+          - idle_vcpu: 8
+            duration_s: 900
+          - idle_vcpu: 16
+            duration_s: 420
+          - idle_vcpu: 24
+            duration_s: 90
+          - idle_vcpu: 32
+            duration_s: 24
+
+  # ── 21:00 – 00:00: off-peak ──────────────────────────────────────────────
+  # Low arrival rate: spawn slowly, drain aggressively to avoid idle spend.
+  - start_time_s: 75600
+    end_time_s: 86400
+    queues:
+      - exclusive_min_gb: 0
+        inclusive_max_gb: 16
+        spawn_instance_class: c7i.4xlarge
+        spawn_rate_per_min: 0.5        # one node per 2 min max
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 10 mins
+            duration_s: 600
+          - idle_vcpu: 4             # 1/4 idle: drain after 5 mins
+            duration_s: 300
+          - idle_vcpu: 8             # >= half idle: drain after 3 min
+            duration_s: 180
+          - idle_vcpu: 12             # nearly empty: drain after 1 min
+            duration_s: 60
+          - idle_vcpu: 16             # empty: drain after 18 s
+            duration_s: 18
+      - exclusive_min_gb: 16
+        inclusive_max_gb: 32
+        spawn_instance_class: c7i.8xlarge
+        spawn_rate_per_min: 0.5        # one node per 2 min max
+        drain_rules:
+          - idle_vcpu: 0              # max lifespan: drain after 10 mins
+            duration_s: 600
+          - idle_vcpu: 8             # 1/4 idle: drain after 5 mins
+            duration_s: 300
+          - idle_vcpu: 16             # >= half idle: drain after 3 min
+            duration_s: 180
+          - idle_vcpu: 24             # nearly empty: drain after 1 min
+            duration_s: 60
+          - idle_vcpu: 32             # empty: drain after 18 s
+            duration_s: 18
+      - exclusive_min_gb: 32
+        inclusive_max_gb: 256
+        spawn_instance_class: r7i.8xlarge
+        spawn_rate_per_min: 0.2       # heavy queue: one node per 5 min max
+        drain_rules:
+          - idle_vcpu: 0
+            duration_s: 600
+          - idle_vcpu: 8
+            duration_s: 300
+          - idle_vcpu: 16
+            duration_s: 180
+          - idle_vcpu: 24
+            duration_s: 60
+          - idle_vcpu: 32
+            duration_s: 18
