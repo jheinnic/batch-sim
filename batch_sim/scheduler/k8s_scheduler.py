@@ -12,10 +12,10 @@ When time_window_policy is absent, all pre-E16 behaviour is preserved.
 """
 from __future__ import annotations
 import uuid, random
-from typing import Optional
+from typing import Any, Generator, Optional
 import simpy
 from batch_sim.core.engine import NodeModel, JobQueue, Priority, QueueEntry, OverloadHandler, run_job_process
-from batch_sim.core.schemas import SchedulerConfig
+from batch_sim.core.schemas import SchedulerConfig, DrainRule, QueuePolicy, TimeWindowPolicy
 from batch_sim.generator.job_spec import JobSpec
 from batch_sim.metrics.collector import MetricsCollector, NodeState as NodeStateEnum
 from batch_sim.registry.instance_registry import InstanceRegistry, NodeCostAccruer, compute_k8s_capacity, K8SCapacityProfile
@@ -23,25 +23,26 @@ from batch_sim.core.schemas import InstanceTypeConfig
 
 
 class K8SScheduler:
-    def __init__(self, cfg, registry, metrics, centroid_peak_rams, rng=None):
+    def __init__(self, cfg: Any, registry: InstanceRegistry, metrics: MetricsCollector,
+                 centroid_peak_rams: list[float], rng: Any = None) -> None:
         self.cfg = cfg; self.registry = registry; self.metrics = metrics
         self.centroid_peak_rams = centroid_peak_rams
         self.rng = rng or random.Random(42)
         self._queue = JobQueue(); self._nodes = {}; self._accruers = {}
         self._reserved = {}; self._capacity_cache = {}
-        self._overload_handler = None; self._panic_monitors = {}
+        self._overload_handler = OverloadHandler(
+            metrics=self.metrics, scheduler_cfg=self.cfg,
+            replay_queue=self._queue, rng=self.rng)
+        self._panic_monitors: dict[str, simpy.Process] = {}
 
         # BSIM-84/85: policy state
         self._active_window_idx: int = 0
         self._drain_monitors: dict[str, simpy.Process] = {}
-        self._node_queue_policy: dict[str, object] = {}  # node_id → QueuePolicy
+        self._node_queue_policy: dict[str, QueuePolicy] = {}  # node_id → QueuePolicy
         self._last_spawn_t: dict[str, float] = {}        # queue band key → last spawn time
 
-    def _setup(self, env):
+    def _setup(self, env: simpy.Environment) -> None:
         self._env = env
-        self._overload_handler = OverloadHandler(
-            metrics=self.metrics, scheduler_cfg=self.cfg,
-            replay_queue=self._queue, rng=self.rng)
         if self.cfg.time_window_policy:
             windows = sorted(self.cfg.time_window_policy, key=lambda w: w.start_time_s)
             self._active_window_idx = self._find_window_idx(env.now % 86400.0, windows)
@@ -59,14 +60,14 @@ class K8SScheduler:
                 return i
         return len(windows) - 1  # last window covers up to 86400
 
-    def _active_window(self) -> object | None:
+    def _active_window(self) -> Optional[TimeWindowPolicy]:
         """Return the currently active TimeWindowPolicy, or None."""
         if not self.cfg.time_window_policy:
             return None
         windows = sorted(self.cfg.time_window_policy, key=lambda w: w.start_time_s)
         return windows[self._active_window_idx]
 
-    def _route_to_queue(self, peak_ram_gb: float) -> object | None:
+    def _route_to_queue(self, peak_ram_gb: float) -> Optional[QueuePolicy]:
         """Find the QueuePolicy for a job's peak RAM in the active window."""
         window = self._active_window()
         if window is None:
@@ -76,7 +77,7 @@ class K8SScheduler:
                 return q
         return None  # no band covers this RAM — job rejected at placement
 
-    def _policy_timer(self, env, windows: list):
+    def _policy_timer(self, env: simpy.Environment, windows: list[Any]) -> Generator[Any, None, None]:
         """Process: wakes at each window boundary and swaps the active policy."""
         while True:
             current_idx = self._active_window_idx
@@ -110,7 +111,7 @@ class K8SScheduler:
     # BSIM-85: drain rule helpers
     # -----------------------------------------------------------------------
 
-    def _best_drain_rule(self, node_id: str, idle_vcpu: float) -> object | None:
+    def _best_drain_rule(self, node_id: str, idle_vcpu: float) -> Optional[DrainRule]:
         """Return the most aggressive drain rule that applies (highest threshold ≤ idle_vcpu)."""
         qp = self._node_queue_policy.get(node_id)
         if qp is None or not qp.drain_rules:
@@ -120,7 +121,7 @@ class K8SScheduler:
             return None
         return max(applicable, key=lambda r: r.idle_vcpu)
 
-    def _drain_monitor(self, env, node):
+    def _drain_monitor(self, env: simpy.Environment, node: NodeModel) -> Generator[Any, None, None]:
         """
         Per-node process: evaluates drain rules continuously.
         Interrupted whenever a job is placed or completes on this node, or
@@ -136,18 +137,18 @@ class K8SScheduler:
                     yield env.timeout(float('inf'))
                 except simpy.Interrupt:
                     continue
+            else:
+                try:
+                    yield env.timeout(rule.duration_s)
+                except simpy.Interrupt:
+                    continue
 
-            try:
-                yield env.timeout(rule.duration_s)
-            except simpy.Interrupt:
-                continue
-
-            # Timer fired — check state is still valid before draining
-            if node.state in (NodeStateEnum.TERMINATED, NodeStateEnum.DRAINING):
+                # Timer fired — check state is still valid before draining
+                if node.state in (NodeStateEnum.TERMINATED, NodeStateEnum.DRAINING):
+                    return
+                node.state = NodeStateEnum.DRAINING
+                self.metrics.node_draining(env.now, node.node_id, rule.idle_vcpu)
                 return
-            node.state = NodeStateEnum.DRAINING
-            self.metrics.node_draining(env.now, node.node_id, rule.idle_vcpu)
-            return
 
     def _interrupt_drain_monitor(self, node_id: str) -> None:
         proc = self._drain_monitors.get(node_id)
@@ -158,7 +159,7 @@ class K8SScheduler:
     # Core capacity helpers (unchanged)
     # -----------------------------------------------------------------------
 
-    def _k8s_capacity(self, instance):
+    def _k8s_capacity(self, instance: InstanceTypeConfig) -> K8SCapacityProfile:
         if instance.name not in self._capacity_cache:
             self._capacity_cache[instance.name] = compute_k8s_capacity(
                 instance=instance, centroid_peak_rams=self.centroid_peak_rams,
@@ -169,7 +170,7 @@ class K8SScheduler:
     # Job lifecycle
     # -----------------------------------------------------------------------
 
-    def on_job_arrival(self, env, job, arrival_time):
+    def on_job_arrival(self, env: simpy.Environment, job: JobSpec, arrival_time: float) -> None:
         if not hasattr(self, "_env"): self._setup(env)
         self.metrics.job_queued(env.now, job.job_id, job.centroid_id, "NORMAL")
         self._queue.enqueue(job, arrival_time=arrival_time, priority=Priority.NORMAL, enqueue_time=env.now)
@@ -177,7 +178,7 @@ class K8SScheduler:
         self._panic_monitors[job.job_id] = proc
         self._try_schedule(env)
 
-    def on_job_complete(self, env, node, job):
+    def on_job_complete(self, env: simpy.Environment, node: NodeModel, job: JobSpec) -> None:
         soft = job.profile.soft_limit_ram_gb
         node.allocated_ram_gb = max(0.0, node.allocated_ram_gb - soft)
         node.allocated_vcpu = max(0.0, node.allocated_vcpu - (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu))
@@ -200,7 +201,7 @@ class K8SScheduler:
         self._interrupt_drain_monitor(node.node_id)
         self._try_schedule(env)
 
-    def guarantee_capacity(self, env, job):
+    def guarantee_capacity(self, env: simpy.Environment, job: JobSpec) -> None:
         soft = job.profile.soft_limit_ram_gb
         vcpu = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
         for node in self._nodes.values():
@@ -213,7 +214,7 @@ class K8SScheduler:
         if instance:
             env.process(self._launch_node(env, instance, for_job=job))
 
-    def _select_instance_for_job(self, job):
+    def _select_instance_for_job(self, job: JobSpec) -> Optional[InstanceTypeConfig]:
         """
         Pick the instance to launch for this job.
         With time_window_policy: use the queue's spawn_instance_class.
@@ -223,25 +224,36 @@ class K8SScheduler:
             qp = self._route_to_queue(job.profile.preprocess_peak_ram_gb)
             if qp is None:
                 return None
-            # Spawn rate cooldown: at most one node per (60 / spawn_rate_per_min) seconds
+            # Spawn rate cool_down: at most one node per (60 / spawn_rate_per_min) seconds
             band_key = f"{qp.exclusive_min_gb}-{qp.inclusive_max_gb}"
             now = getattr(self, '_env', None)
             if now is not None:
                 now = self._env.now
-                cooldown = 60.0 / qp.spawn_rate_per_min
-                last = self._last_spawn_t.get(band_key, -cooldown)
-                if now - last < cooldown:
+                cool_down = 60.0 / qp.spawn_rate_per_min
+                last = self._last_spawn_t.get(band_key, -cool_down)
+                if now - last < cool_down:
                     return None   # rate-limited: caller will retry on next placement
                 self._last_spawn_t[band_key] = now
             instance = self.registry.get_by_name(qp.spawn_instance_class)
             return instance
         else:
-            vcpu = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
-            return self.registry.cheapest_fitting(
-                min_ram_gb=job.profile.peak_ram_gb + self.cfg.k8s_os_overhead_gb,
-                min_vcpu=vcpu)
+            soft_gb = job.profile.soft_limit_ram_gb
+            vcpu    = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
+            # cheapest_fitting(peak_ram + os, vcpu) picks by physical RAM, but K8S
+            # schedulability requires effective_schedulable_gb >= soft_limit_ram_gb.
+            # When spike headroom consumes most of a small instance's RAM the
+            # schedulable zone can be 0, causing _k8s_fits to always return False
+            # and an avalanche of useless node launches.  Find the cheapest instance
+            # where the job actually fits the K8S schedulable zone.
+            for inst in sorted(self.registry.all_types,
+                               key=lambda i: i.hourly_price_usd):
+                if inst.vcpu < vcpu:
+                    continue
+                if self._k8s_capacity(inst).effective_schedulable_gb >= soft_gb:
+                    return inst
+            return None
 
-    def _try_schedule(self, env):
+    def _try_schedule(self, env: simpy.Environment) -> None:
         """Scan full queue for placeable jobs."""
         import heapq
         changed = True
@@ -255,7 +267,7 @@ class K8SScheduler:
                     changed = True
                     break
 
-    def _place_job(self, env, entry):
+    def _place_job(self, env: simpy.Environment, entry: QueueEntry) -> bool:
         job = entry.job; p = job.profile
         soft = p.soft_limit_ram_gb; vcpu = (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu)
         best = self._best_fit_node(soft, vcpu, job.job_id)
@@ -272,13 +284,13 @@ class K8SScheduler:
             queue_entry_time=entry.enqueue_time, scheduler=self))
         return True
 
-    def _k8s_fits(self, node, soft_gb, vcpu):
+    def _k8s_fits(self, node: NodeModel, soft_gb: float, vcpu: float) -> bool:
         cap = self._capacity_cache.get(node.instance.name)
         if cap is None or cap.effective_schedulable_gb <= 0: return False
         return (node.allocated_ram_gb + soft_gb <= cap.effective_schedulable_gb
                 and node.allocated_vcpu + vcpu <= node.physical_vcpu)
 
-    def _best_fit_node(self, soft_gb, vcpu, job_id):
+    def _best_fit_node(self, soft_gb: float, vcpu: float, job_id: str) -> Optional[NodeModel]:
         candidates = [(node.allocated_ram_gb, node)
             for node in self._nodes.values()
             if node.state == NodeStateEnum.READY           # DRAINING excluded
@@ -287,7 +299,7 @@ class K8SScheduler:
         if not candidates: return None
         return max(candidates, key=lambda x: x[0])[1]
 
-    def _launch_node(self, env, instance, for_job=None):
+    def _launch_node(self, env: simpy.Environment, instance: InstanceTypeConfig, for_job: Optional[JobSpec] = None) -> Generator[Any, None, None]:
         node_id = str(uuid.uuid4())[:8]
         self.metrics.node_launching(env.now, node_id, instance.name)
         cap = self._k8s_capacity(instance)
@@ -315,7 +327,7 @@ class K8SScheduler:
 
         self._try_schedule(env)
 
-    def _scale_out_monitor(self, env):
+    def _scale_out_monitor(self, env: simpy.Environment) -> Generator[Any, None, None]:
         """
         Polling coroutine: when the oldest queued job has waited at least
         cfg.scale_out_threshold_s, calls _provision_to_demand to launch nodes
@@ -329,19 +341,17 @@ class K8SScheduler:
             oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
             remaining = self.cfg.scale_out_threshold_s - oldest_wait
 
-            if remaining > 0:
+            if remaining > 1e-6:
                 yield env.timeout(remaining)
             else:
                 self._provision_to_demand(env)
                 yield env.timeout(self.cfg.scale_out_poll_s)
 
-    def _provision_to_demand(self, env):
+    def _provision_to_demand(self, env: simpy.Environment) -> None:
         """
-        Greedy first-fit over the full queue: for each queued job that cannot
-        fit into any existing (READY or LAUNCHING) node's remaining K8S capacity,
-        launch a new node via _select_instance_for_job and add its residual to
-        the virtual pool. The time-window spawn_rate_per_min cooldown in
-        _select_instance_for_job naturally caps how many launch in one call.
+        Karpenter-style demand provisioning: score every instance type against
+        the full overflow queue and launch whichever type packs the most unserved
+        jobs per dollar, repeating until all overflow is covered.
         """
         virtual = []
         for n in self._nodes.values():
@@ -350,6 +360,7 @@ class K8SScheduler:
                 if cap and cap.effective_schedulable_gb > 0:
                     virtual.append([cap.effective_schedulable_gb - n.allocated_ram_gb,
                                      n.physical_vcpu - n.allocated_vcpu])
+        overflow = []
         for entry in sorted(self._queue._heap):
             job = entry.job; p = job.profile
             soft = p.soft_limit_ram_gb
@@ -359,21 +370,54 @@ class K8SScheduler:
                     vn[0] -= soft; vn[1] -= vcpu
                     break
             else:
-                instance = self._select_instance_for_job(job)
-                if instance:
-                    cap = self._k8s_capacity(instance)
-                    env.process(self._launch_node(env, instance))
-                    virtual.append([cap.effective_schedulable_gb - soft,
-                                     instance.vcpu - vcpu])
+                overflow.append((p.peak_ram_gb, soft, vcpu))
 
-    def _panic_monitor(self, env, job, enqueue_time):
+        while overflow:
+            inst = self._select_instance_for_overflow(overflow)
+            if inst is None:
+                break
+            cap = self._k8s_capacity(inst)
+            env.process(self._launch_node(env, inst))
+            rem_gb, rem_vcpu = cap.effective_schedulable_gb, inst.vcpu
+            remaining = []
+            for peak, soft, vcpu in overflow:
+                if rem_gb >= soft and rem_vcpu >= vcpu:
+                    rem_gb -= soft; rem_vcpu -= vcpu
+                else:
+                    remaining.append((peak, soft, vcpu))
+            overflow = remaining
+
+    def _select_instance_for_overflow(self, overflow: list) -> Optional[Any]:
+        """Score each instance type by (K8S jobs fitting greedily / hourly rate).
+        Ties broken by job count to favour larger instances and fewer nodes."""
+        best_inst, best_score = None, (-1.0, -1)
+        for inst in self.registry.all_types:
+            cap = self._k8s_capacity(inst)
+            if cap.effective_schedulable_gb <= 0:
+                continue
+            rem_gb, rem_vcpu = cap.effective_schedulable_gb, inst.vcpu
+            count = 0
+            for _, soft, vcpu in sorted(overflow, key=lambda x: x[1], reverse=True):
+                if rem_gb >= soft and rem_vcpu >= vcpu:
+                    rem_gb -= soft; rem_vcpu -= vcpu
+                    count += 1
+            if count > 0:
+                # Primary: most jobs packed (minimises node count and warmup overhead).
+                # Secondary: highest jobs/dollar when counts are equal.
+                score = (count, count / inst.hourly_price_usd)
+                if score > best_score:
+                    best_score = score
+                    best_inst = inst
+        return best_inst
+
+    def _panic_monitor(self, env: simpy.Environment, job: JobSpec, enqueue_time: float) -> Generator[Any, None, None]:
         try: yield env.timeout(self.cfg.panic_threshold_seconds)
         except simpy.Interrupt: return
         self.metrics.panic_trigger(env.now, job.job_id, env.now - enqueue_time)
         self._queue.elevate_to_urgent(job.job_id)
         self.guarantee_capacity(env, job)
 
-    def _idle_timer(self, env, node):
+    def _idle_timer(self, env: simpy.Environment, node: NodeModel) -> Generator[Any, None, None]:
         idle_start = env.now
         yield env.timeout(self.cfg.idle_timeout_seconds)
         if node.state == NodeStateEnum.IDLE and node.job_count == 0:
@@ -382,18 +426,18 @@ class K8SScheduler:
             accruer = self._accruers.get(node.node_id)
             if accruer: accruer.terminate(env.now)
 
-    def cpu_boost(self, env, node, metrics):
+    def cpu_boost(self, env: simpy.Environment, node: NodeModel, metrics: MetricsCollector) -> None:
         from batch_sim.scheduler.cpu_boost_integration import run_cpu_boost_k8s
         run_cpu_boost_k8s(env, node, metrics)
 
     @property
-    def accruers(self): return list(self._accruers.values())
+    def accruers(self) -> list[NodeCostAccruer]: return list(self._accruers.values())
 
-    def finalize(self, env):
+    def finalize(self, env: simpy.Environment) -> None:
         for accruer in self._accruers.values():
             if not accruer.is_terminated: accruer.terminate(env.now)
 
-    def capacity_report(self):
+    def capacity_report(self) -> dict[str, dict[str, Any]]:
         return {name: {"tier_local_mm_gb": cap.tier_local_mm_gb,
             "effective_schedulable_gb": cap.effective_schedulable_gb,
             "soft_limit_gb": cap.soft_limit_gb,
