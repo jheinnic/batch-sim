@@ -135,9 +135,14 @@ class _QueuePool:
 
     def _k8s_capacity(self, instance):
         if instance.name not in self._capacity_cache:
+            # BSIM-104: compute_k8s_capacity takes a scalar spike_max_gb. This legacy
+            # two-queue scheduler derives it from the observed centroid peaks, matching
+            # K8SScheduler's no-tier path (largest positive peak).
+            fitting = [r for r in self.centroid_peak_rams if r > 0]
+            spike_max = max(fitting) if fitting else 0.0
             self._capacity_cache[instance.name] = compute_k8s_capacity(
                 instance=instance,
-                centroid_peak_rams=self.centroid_peak_rams,
+                spike_max_gb=spike_max,
                 os_overhead_gb=self.cfg.k8s_os_overhead_gb,
             )
         return self._capacity_cache[instance.name]

@@ -58,6 +58,10 @@ class JobSpec:
     # hard_cpu: burst ceiling (thread count of busiest parallel stage)
     soft_cpu: int = 0   # 0 = use profile.workhorse_declared_vcpu
     hard_cpu: int = 0   # 0 = no burst (equals soft_cpu)
+    # BSIM-104: tier names this job may run on, resolved at generation time.
+    # Empty = no constraint (legacy / no-tier mode, or burst-derived at arrival).
+    compatible_tiers: list[str] = field(default_factory=list)
+    bin_idx: int | None = None    # BSIM-100: bin selected at generation; None for Pareto (non-bin) jobs
     is_cancelled: bool = False  # set by OverloadHandler when another job's check evicts this one
 
     def fresh_copy(self) -> "JobSpec":

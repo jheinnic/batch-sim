@@ -3,8 +3,11 @@ import pytest, numpy as np
 from batch_sim.generator.job_spec import build_phase_profile
 from batch_sim.generator.sampler import sample_job
 from batch_sim.generator.event_list import build_event_list, save_event_list, load_event_list
-from batch_sim.registry.instance_registry import compute_k8s_capacity, batch_max_jobs, NodeCostAccruer
-from batch_sim.core.schemas import InstanceTypeConfig, InstanceFamily
+from batch_sim.registry.instance_registry import (
+    compute_k8s_capacity, batch_max_jobs, NodeCostAccruer,
+    EBS_GP3_PRICE_PER_GB_HOUR, workspace_gb,
+)
+from batch_sim.core.schemas import InstanceTypeConfig, InstanceFamily, StoragePoolConfig
 from batch_sim.metrics.collector import MetricsCollector
 
 
@@ -96,21 +99,26 @@ class TestInstanceRegistry:
 
 class TestK8SCapacity:
     def test_worked_example(self):
+        # BSIM-102: spike_max_gb is a hardware constant from QueueDefinition, not job-spec derived
         inst = InstanceTypeConfig(name="r7i.4xlarge", family=InstanceFamily.MEMORY,
                                    ram_gb=128, vcpu=16, hourly_price_usd=1.0)
-        cap = compute_k8s_capacity(inst, [64.0], os_overhead_gb=0.0)
+        cap = compute_k8s_capacity(inst, spike_max_gb=64.0, os_overhead_gb=4.0)
         assert cap.tier_local_mm_gb == 64.0
-        assert abs(cap.spike_headroom_gb - 0.92 * 64.0) < 0.01
-        assert cap.max_schedulable_jobs == int(69.12 // 5.12)
+        assert cap.spike_headroom_gb == 64.0
+        # effective_schedulable_gb = 128 - 4 (os) - 64 (spike) = 60
+        assert cap.effective_schedulable_gb == 60.0
 
     def test_small_jobs_no_crash(self): assert 32.0 + 32.0 <= 128.0
     def test_large_jobs_crash(self): assert 64.0 + 64.0 >= 128.0
 
-    def test_tier_local_excludes_too_large(self):
-        inst = InstanceTypeConfig(name="m7i.2xlarge", family=InstanceFamily.GENERAL,
-                                   ram_gb=32, vcpu=8, hourly_price_usd=0.4)
-        cap = compute_k8s_capacity(inst, [64.0, 16.0], os_overhead_gb=0.0)
-        assert cap.tier_local_mm_gb == 16.0
+    def test_spike_max_drives_schedulable_zone(self):
+        # Two queues using the same instance but different spike_max_gb get different capacity
+        inst = InstanceTypeConfig(name="r7i.4xlarge", family=InstanceFamily.MEMORY,
+                                   ram_gb=128, vcpu=16, hourly_price_usd=1.0)
+        cap_small = compute_k8s_capacity(inst, spike_max_gb=32.0, os_overhead_gb=4.0)
+        cap_large = compute_k8s_capacity(inst, spike_max_gb=64.0, os_overhead_gb=4.0)
+        assert cap_small.effective_schedulable_gb == 92.0  # 128 - 4 - 32
+        assert cap_large.effective_schedulable_gb == 60.0  # 128 - 4 - 64
 
     def test_batch_max_jobs(self):
         inst = InstanceTypeConfig(name="r7i.4xlarge", family=InstanceFamily.MEMORY,
@@ -118,11 +126,15 @@ class TestK8SCapacity:
         assert batch_max_jobs(inst, 64.0, 8) == 2
 
     def test_k8s_packs_more_than_batch(self):
+        # K8S with small spike reservation leaves more schedulable RAM than Batch's peak-per-job limit
         inst = InstanceTypeConfig(name="r7i.4xlarge", family=InstanceFamily.MEMORY,
                                    ram_gb=128, vcpu=16, hourly_price_usd=1.0)
-        b = batch_max_jobs(inst, 64.0, 8)
-        cap = compute_k8s_capacity(inst, [64.0], os_overhead_gb=0.0)
-        assert cap.max_schedulable_jobs > b * 2
+        b = batch_max_jobs(inst, 64.0, 8)       # 2 jobs (64GB each, max-peak basis)
+        cap = compute_k8s_capacity(inst, spike_max_gb=64.0, os_overhead_gb=0.0)
+        # With spike_max=64 and soft_limit=10 per job, effective=64 → 6 jobs fit vs batch's 2
+        soft_per_job = 10.0
+        k8s_jobs = int(cap.effective_schedulable_gb // soft_per_job)
+        assert k8s_jobs > b
 
 
 class TestCostAccruer:
@@ -177,6 +189,62 @@ class TestK8SIntegration:
         from batch_sim.core.schemas import SchedulerType
         sc = run_one(event_list, SchedulerType.K8S, k8s_cfg, registry, "test")
         assert sc.k8s_capacity_report is not None
+
+
+class TestBSIM91StorageSchema:
+    def test_instance_type_default_max_ebs_volumes(self):
+        inst = InstanceTypeConfig(name="m7i.2xlarge", family=InstanceFamily.GENERAL,
+                                   ram_gb=32, vcpu=8, hourly_price_usd=0.40)
+        assert inst.max_ebs_volumes == 28
+
+    def test_instance_type_custom_max_ebs_volumes(self):
+        inst = InstanceTypeConfig(name="c7i.48xlarge", family=InstanceFamily.COMPUTE,
+                                   ram_gb=384, vcpu=192, hourly_price_usd=8.16,
+                                   max_ebs_volumes=16)
+        assert inst.max_ebs_volumes == 16
+
+    def test_storage_pool_config_defaults(self):
+        cfg = StoragePoolConfig()
+        assert cfg.initial_volume_count == 2
+        assert cfg.volume_size_gb == 1000.0
+        assert cfg.logical_capacity_gb == 65536.0
+        assert abs(cfg.expansion_trigger_pct - 0.80) < 1e-9
+        assert abs(cfg.ebs_price_per_gb_hour - EBS_GP3_PRICE_PER_GB_HOUR) < 1e-12
+
+    def test_storage_pool_config_roundtrip(self):
+        cfg = StoragePoolConfig(initial_volume_count=4, volume_size_gb=500.0,
+                                expansion_trigger_pct=0.75, ebs_price_per_gb_hour=0.0002)
+        assert cfg.initial_volume_count == 4
+        assert cfg.volume_size_gb == 500.0
+        assert abs(cfg.expansion_trigger_pct - 0.75) < 1e-9
+
+    def test_scheduler_config_storage_absent(self, batch_cfg):
+        assert batch_cfg.storage is None
+
+    def test_scheduler_config_storage_present(self):
+        from batch_sim.core.schemas import SchedulerConfig, SchedulerType
+        cfg = SchedulerConfig(scheduler_type=SchedulerType.BATCH,
+                              storage=StoragePoolConfig(volume_size_gb=2000.0))
+        assert cfg.storage is not None
+        assert cfg.storage.volume_size_gb == 2000.0
+
+    def test_ebs_constant_value(self):
+        assert abs(EBS_GP3_PRICE_PER_GB_HOUR - 0.0001096) < 1e-12
+
+    def test_workspace_gb_returns_preprocess_peak_ram(self):
+        p = build_phase_profile(download_gb=4.0, preprocess_a=1.0, preprocess_b=1.0,
+            preprocess_duration_s=20.0, workhorse_cpu_stages=[60.0],
+            workhorse_hard_vcpu=[4], io_wait_fraction=0.0, upload_gb=0.5,
+            network_bandwidth_mbps=500.0)
+        from batch_sim.generator.job_spec import JobSpec
+        job = JobSpec(job_id="j1", centroid_id="c1", profile=p)
+        assert workspace_gb(job) == p.preprocess_peak_ram_gb
+
+    def test_workspace_gb_16gb_centroid(self):
+        from batch_sim.generator.job_spec import PhaseProfile, JobSpec
+        p = PhaseProfile(download_duration_s=0.0, preprocess_peak_ram_gb=16.0)
+        job = JobSpec(job_id="j1", centroid_id="c1", profile=p)
+        assert workspace_gb(job) == 16.0
 
 
 class TestScorecardIO:

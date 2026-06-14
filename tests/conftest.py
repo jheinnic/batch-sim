@@ -29,7 +29,11 @@ def large_centroid():
 
 @pytest.fixture
 def sim_config(small_centroid, large_centroid):
-    return SimulationConfig(horizon_seconds=1800.0, random_seed=7,
+    # cool_off_seconds gives a finite simulation horizon (horizon + cool_off) so
+    # run_one terminates; without it engine.run uses until=None and the schedulers'
+    # perpetual scale-out monitor keeps the SimPy loop alive forever. Real configs
+    # all set this (see configs/*.yaml).
+    return SimulationConfig(horizon_seconds=1800.0, random_seed=7, cool_off_seconds=1800.0,
         network_bandwidth_mbps=500.0, centroids=[small_centroid, large_centroid])
 
 @pytest.fixture

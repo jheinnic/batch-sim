@@ -15,6 +15,46 @@ from batch_sim.scheduler.k8s_scheduler import K8SScheduler
 console = Console()
 
 
+def _tier_config_from_metadata(metadata: dict[str, Any]) -> "dict[str, dict] | None":
+    """BSIM-105: Read centroid_tier_config from event-list metadata.
+
+    Old event lists carry centroid_queue_config (single-queue) instead; promote
+    each single-queue value to a single-element compatible-tier set so the tier
+    scheduler can consume them unchanged.
+    """
+    tier_cfg = metadata.get("centroid_tier_config")
+    if tier_cfg is not None:
+        return tier_cfg
+    queue_cfg = metadata.get("centroid_queue_config")
+    if queue_cfg is None:
+        return None
+
+    def promote(qn: "str | list | None") -> "list | None":
+        if isinstance(qn, str):
+            return [qn]
+        return None  # list (per-bin) handled via *_by_bin below
+
+    promoted: dict[str, dict] = {}
+    for cid, c in queue_cfg.items():
+        qn = c.get("queue_name")
+        promoted[cid] = {
+            "compatible_tiers": promote(qn),
+            "window_overrides": [
+                {
+                    "start_time_s": w["start_time_s"],
+                    "end_time_s": w["end_time_s"],
+                    "compatible_tiers": promote(w.get("queue_name")),
+                    "compatible_tiers_by_bin": (
+                        [[q] for q in w["queue_name"]]
+                        if isinstance(w.get("queue_name"), list) else None
+                    ),
+                }
+                for w in c.get("window_overrides", [])
+            ],
+        }
+    return promoted
+
+
 def run_one(
     event_list: EventList,
     scheduler_type: SchedulerType,
@@ -33,13 +73,17 @@ def run_one(
         scheduler = BatchScheduler(cfg=cfg, registry=registry, metrics=metrics, rng=rng)
     elif (scheduler_type == SchedulerType.K8S):
         centroid_peak_rams = list({e.preprocess_peak_ram_gb for e in event_list.events})
+        centroid_tier_config = _tier_config_from_metadata(event_list.metadata)
         scheduler = K8SScheduler(cfg=cfg, registry=registry, metrics=metrics,
-                                 centroid_peak_rams=centroid_peak_rams, rng=rng)
+                                 centroid_peak_rams=centroid_peak_rams,
+                                 centroid_tier_config=centroid_tier_config, rng=rng)
     elif (scheduler_type == SchedulerType.K8SPLUS):
         centroid_peak_rams = list({e.preprocess_peak_ram_gb for e in event_list.events})
+        centroid_tier_config = _tier_config_from_metadata(event_list.metadata)
         from batch_sim.scheduler.k8s_plus_scheduler import K8SPlusScheduler
         scheduler = K8SPlusScheduler(cfg=cfg, registry=registry, metrics=metrics,
-                                 centroid_peak_rams=centroid_peak_rams, rng=rng)
+                                     centroid_peak_rams=centroid_peak_rams,
+                                     centroid_tier_config=centroid_tier_config, rng=rng)
     else:
         raise ValueError(f"Unknown scheduler type: {scheduler_type}")
     engine = SimulationEngine(scheduler=scheduler, metrics=metrics, cfg=cfg)
@@ -51,11 +95,12 @@ def run_one(
     else:
         k8s_cap = None
     sim_horizon = event_list.metadata.get("horizon_seconds", 0)
+    storage_pools = getattr(scheduler, "storage_pools", None)
     sc = build_scorecard(scheduler_type=scheduler_type.value,
         panic_threshold_s=cfg.panic_threshold_seconds, event_list_path=event_list_path,
         collector=metrics, accruers=scheduler.accruers,
         sla_target_seconds=cfg.sla_target_seconds, sim_horizon=sim_horizon,
-        k8s_capacity_report=k8s_cap)
+        k8s_capacity_report=k8s_cap, storage_pools=storage_pools)
     return (sc, metrics) if return_metrics else sc
 
 

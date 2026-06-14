@@ -2,13 +2,13 @@
 from __future__ import annotations
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import numpy as np
 from numpy.random import Generator
-from batch_sim.core.schemas import CentroidConfig, SimulationConfig
+from batch_sim.core.schemas import CentroidConfig, SimulationConfig, parse_tier_set
 from batch_sim.generator.job_spec import JobSpec, PhaseProfile, Stage
 from batch_sim.generator.sampler import sample_job
 
@@ -123,6 +123,8 @@ class JobArrivalEvent:
     soft_cpu: int = 0       # BSIM-69: K8S soft limit (scheduler reservation)
     hard_cpu: int = 0       # BSIM-69: K8S hard limit (burst ceiling = thread count)
     workhorse_hard_limit_gb: float = 0.0  # bin_steady_state_hard_limit_gb → K8S memory request
+    compatible_tiers: list[str] = field(default_factory=list)  # BSIM-104: resolved tier set at generation
+    bin_idx: int | None = None    # BSIM-100: bin selected at generation; None for Pareto (non-bin) jobs
 
     def to_job_spec(self) -> JobSpec:
         stages = [
@@ -150,7 +152,8 @@ class JobArrivalEvent:
         )
         return JobSpec(job_id=self.job_id, centroid_id=self.centroid_id,
                        profile=profile,
-                       soft_cpu=self.soft_cpu, hard_cpu=self.hard_cpu)
+                       soft_cpu=self.soft_cpu, hard_cpu=self.hard_cpu,
+                       compatible_tiers=list(self.compatible_tiers), bin_idx=self.bin_idx)
 
 
 def _event_from_job(arrival_time, job):
@@ -173,6 +176,7 @@ def _event_from_job(arrival_time, job):
         workhorse_ram_gb=p.workhorse_ram_gb,
         upload_duration_s=p.upload_duration_s, upload_ram_gb=p.upload_ram_gb,
         soft_cpu=job.soft_cpu, hard_cpu=job.hard_cpu,
+        compatible_tiers=list(job.compatible_tiers), bin_idx=job.bin_idx,
     )
 
 
@@ -213,6 +217,36 @@ def build_event_list(config: SimulationConfig) -> EventList:
         "cool_off_seconds": config.cool_off_seconds,
         "burst_params": {
             c.id: {"min": c.burst_size_min, "max": c.burst_size_max}
+            for c in config.centroids
+        },
+        # BSIM-105: centroid tier bindings for time-window override resolution at
+        # scheduler time. The centroid-level default and per-bin assignment are
+        # already resolved onto each job's compatible_tiers at generation; only the
+        # window overrides need to be re-evaluated at arrival time (they depend on
+        # env.now), so those are carried here.
+        "centroid_tier_config": {
+            c.id: {
+                "compatible_tiers": (
+                    parse_tier_set(c.compatible_tiers)
+                    if isinstance(c.compatible_tiers, str) else None
+                ),
+                "window_overrides": [
+                    {
+                        "start_time_s": w.start_time_s,
+                        "end_time_s": w.end_time_s,
+                        "compatible_tiers": (
+                            parse_tier_set(w.compatible_tiers)
+                            if isinstance(w.compatible_tiers, str) else None
+                        ),
+                        "compatible_tiers_by_bin": (
+                            [parse_tier_set(e) for e in w.compatible_tiers]
+                            if isinstance(w.compatible_tiers, list) else None
+                        ),
+                    }
+                    for w in (c.time_windows or [])
+                    if w.compatible_tiers is not None
+                ],
+            }
             for c in config.centroids
         },
     }
