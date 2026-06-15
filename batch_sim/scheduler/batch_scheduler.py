@@ -67,7 +67,7 @@ class BatchScheduler:
             oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
             remaining = self.cfg.scale_out_threshold_s - oldest_wait
 
-            if remaining > 0:
+            if remaining > 1e-6:
                 yield env.timeout(remaining)
             else:
                 self._provision_to_demand(env)
@@ -75,10 +75,11 @@ class BatchScheduler:
 
     def _provision_to_demand(self, env):
         """
-        Greedy first-fit over the full queue: for each queued job that cannot
-        fit into any existing (READY or LAUNCHING) node's remaining capacity,
-        launch a new node and add its residual capacity to the virtual pool.
-        Models real AWS Batch demand-based autoscaling.
+        Karpenter-style demand provisioning: score every instance type against
+        the full overflow queue and launch whichever type packs the most unserved
+        jobs per dollar, repeating until all overflow is covered or no suitable
+        type exists.  Models AWS Batch demand-based autoscaling with queue-aware
+        node sizing rather than cheapest-per-job selection.
         """
         virtual = [
             [n.physical_ram_gb - n.allocated_ram_gb,
@@ -86,6 +87,7 @@ class BatchScheduler:
             for n in self._nodes.values()
             if n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
         ]
+        overflow = []
         for entry in sorted(self._queue._heap):
             job = entry.job; p = job.profile
             _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
@@ -95,10 +97,42 @@ class BatchScheduler:
                     vn[0] -= ram; vn[1] -= _vcpu
                     break
             else:
-                instance = self.registry.cheapest_fitting(ram, _vcpu)
-                if instance:
-                    env.process(self._launch_node(env, instance))
-                    virtual.append([instance.ram_gb - ram, instance.vcpu - _vcpu])
+                overflow.append((ram, _vcpu))
+
+        while overflow:
+            inst = self._select_instance_for_overflow(overflow)
+            if inst is None:
+                break
+            env.process(self._launch_node(env, inst))
+            rem_ram, rem_vcpu = inst.ram_gb, inst.vcpu
+            remaining = []
+            for ram, vcpu in overflow:
+                if rem_ram >= ram and rem_vcpu >= vcpu:
+                    rem_ram -= ram; rem_vcpu -= vcpu
+                else:
+                    remaining.append((ram, vcpu))
+            overflow = remaining
+
+    def _select_instance_for_overflow(self, overflow: list) -> Optional[Any]:
+        """Score each instance type by (jobs fitting greedily / hourly rate).
+        Ties broken by raw job count so equal-rate types resolve toward larger
+        instances, reducing total node count and warmup overhead."""
+        best_inst, best_score = None, (-1.0, -1)
+        for inst in self.registry.all_types:
+            rem_ram, rem_vcpu = inst.ram_gb, inst.vcpu
+            count = 0
+            for ram, vcpu in sorted(overflow, reverse=True):
+                if rem_ram >= ram and rem_vcpu >= vcpu:
+                    rem_ram -= ram; rem_vcpu -= vcpu
+                    count += 1
+            if count > 0:
+                # Primary: most jobs packed (minimises node count and warmup overhead).
+                # Secondary: highest jobs/dollar when counts are equal.
+                score = (count, count / inst.hourly_price_usd)
+                if score > best_score:
+                    best_score = score
+                    best_inst = inst
+        return best_inst
 
     def _try_schedule(self, env):
         """Scan full queue for placeable jobs; do not stop at first unplaceable
@@ -181,5 +215,12 @@ class BatchScheduler:
     def accruers(self): return list(self._accruers.values())
 
     def finalize(self, env):
-        for accruer in self._accruers.values():
-            if not accruer.is_terminated: accruer.terminate(env.now)
+        for node_id, accruer in self._accruers.items():
+            if not accruer.is_terminated:
+                accruer.terminate(env.now)
+                node = self._nodes.get(node_id)
+                idle_since = (node.idle_since if node and node.idle_since >= 0
+                              else env.now)
+                self.metrics.node_terminated(env.now, node_id, env.now - idle_since)
+                if node:
+                    node.state = NodeStateEnum.TERMINATED
