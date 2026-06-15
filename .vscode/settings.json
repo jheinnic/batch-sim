@@ -1,0 +1,20 @@
+{
+   "python-envs.defaultEnvManager": "ms-python.python:venv",
+   "python-envs.alwaysUseUv": true,
+   "python-envs.defaultPackageManager": "ms-python.python:pip",
+   "python.analysis.includeVenvInWorkspaceSymbols": true,
+   "editor.formatOnSave": true,
+   "cSpell.words": [
+      "Accruer",
+      "accruers",
+      "BSIM",
+      "cooloff",
+      "Karpenter",
+      "procs",
+      "schedulable",
+      "simpy",
+      "SPLUS",
+      "underutilize",
+      "vcpu"
+   ]
+}
