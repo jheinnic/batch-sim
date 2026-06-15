@@ -1,0 +1,38 @@
+{
+   // Use IntelliSense to learn about possible attributes.
+   // Hover to view descriptions of existing attributes.
+   // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+   "version": "0.2.0",
+   "configurations": [
+      {
+         "name": "Python Debugger: Run Simulation",
+         "type": "debugpy",
+         "request": "launch",
+         "program": "batch_sim",
+         "console": "integratedTerminal",
+         "args": "simulate --events workloads/jch_v2_001.json --registry configs/instance_registry.yaml --output results/debug/debug-k8splus --seed 5382 --scheduler-config configs/demo_k8splus_scheduler.yaml --scheduler k8splus"
+      },
+      {
+         "name": "Python Debugger: Generate K8s Node Timelines",
+         "type": "debugpy",
+         "request": "launch",
+         "program": "scripts/generate_node_timelines.py",
+         "console": "integratedTerminal",
+         "args": "--events workloads/jch05.json --registry configs/instance_registry.yaml --output results/M/dbg3-k8splus-nodes  --scheduler k8s --scheduler-config configs/demo_k8splus_schedulerC.yaml --event-log results/M/dg3-k8splus_events.json"
+      },
+      {
+         "name": "Python Debugger: Current File with Arguments",
+         "type": "debugpy",
+         "request": "launch",
+         "program": "${file}",
+         "console": "integratedTerminal",
+         "args": "${command:pickArgs}"
+      },
+      {
+         "name": "Python Debugger: Python File",
+         "type": "debugpy",
+         "request": "launch",
+         "program": "${file}"
+      }
+   ]
+}
