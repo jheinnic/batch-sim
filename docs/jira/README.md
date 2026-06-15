@@ -19,8 +19,10 @@
 | BSIM-E17 | K8S+ Multi-Pool Redesign | BSIM-86 – BSIM-90 |
 | BSIM-E18 | Storage Provisioning Cost Model | BSIM-91 – BSIM-94 |
 | BSIM-E19 | K8S Queue Fidelity | BSIM-100 – BSIM-103 |
-| BSIM-E20 | Multi-Tier Boost Provisioning | BSIM-104 – BSIM-108, BSIM-113 |
-| BSIM-E21 | Scheduler Config Composition | BSIM-109 – BSIM-112 |
+| BSIM-E20 | Multi-Tier Boost Provisioning | BSIM-104 – BSIM-108, BSIM-113, BSIM-122 |
+| BSIM-E21 | Per-Scheduler Config Schemas | BSIM-109 – BSIM-112, BSIM-114 – BSIM-115, BSIM-123 |
+| BSIM-E22 | Retire Advantage-Ratio Experiments | BSIM-116 – BSIM-117 |
+| BSIM-E23 | Declarative Experiment Orchestration | BSIM-118 – BSIM-121 |
 
 ## Files
 
@@ -40,4 +42,6 @@
 - [BSIM-E18: Storage Provisioning Cost Model](epic_E18_storage_cost_model.md)
 - [BSIM-E19: K8S Queue Fidelity](epic_E19_k8s_queue_fidelity.md)
 - [BSIM-E20: Multi-Tier Boost Provisioning](epic_E20_multi_tier_boost_provisioning.md)
-- [BSIM-E21: Scheduler Config Composition](epic_E21_scheduler_config_composition.md)
+- [BSIM-E21: Per-Scheduler Config Schemas](epic_E21_scheduler_config_composition.md)
+- [BSIM-E22: Retire Advantage-Ratio Experiments](epic_E22_retire_advantage_ratio_experiments.md)
+- [BSIM-E23: Declarative Experiment Orchestration](epic_E23_experiment_orchestration.md)

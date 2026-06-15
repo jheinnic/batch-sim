@@ -428,3 +428,64 @@ on a node that has spare bin-packing space rather than always spinning up a no-b
 - The joint provisioner launches the no-boost tier for a batch of flat jobs
 - A positive-burst job whose only compatible tier is no-boost is `ADMISSION_REJECTED`
 - `_sem_permits` on a no-boost node degrades to a mutex (1 permit), not a crash
+
+---
+
+## BSIM-122 — Adopt NodeBurstPool in mainline K8S+ (GB-aware concurrent boost)
+
+**Type:** Task (bug-fix / boost-model completion) | **Priority:** High | **Status:** To Do
+**Depends on:** BSIM-104
+
+**Description:**
+The tier `spike_max_gb` reservation (BSIM-102/104) sets the *size* of a node's boost
+zone — a provisioning decision that lets the cluster bin-pack by steady-state RAM instead
+of by boost peaks. But it says nothing about *who may boost concurrently within that
+zone at run time*. That runtime layer is `NodeBurstPool` (BSIM-55): a GB-aware pool that
+admits multiple sub-spike jobs into Phase 2 simultaneously as long as their combined
+boost fits the reservation, and serialises only when it would overflow.
+
+`NodeBurstPool` was built but only ever wired into the experimental two-queue scheduler.
+The mainline `K8SPlusScheduler` still uses the count-based `NodeSemaphore`, whose permit
+count is `floor(spike_headroom_gb / tier_local_mm_gb)`. Because `compute_k8s_capacity`
+sets both terms equal to `spike_max_gb`, that ratio is **always 1** — the semaphore
+degenerates to a per-node mutex, allowing only one boost at a time regardless of how
+small individual bursts are or how large the reservation is. (This predates E20: legacy
+mode also collapsed both terms, so the count formula never produced >1.) This story lands
+the intended fix in the mainline.
+
+Replace `NodeSemaphore` with `NodeBurstPool` in `K8SPlusScheduler`, with two corrections
+to the BSIM-55 origin:
+1. **Size the pool to the tier's fixed `spike_max_gb`**, not the dynamic `node_max_peak`
+   headroom the original computed. The reservation is the budget; it does not grow with
+   whatever job happens to land.
+2. **Hard invariant: concurrent boost is bounded by the reservation and never borrows
+   free bin-packing space.** Momentarily-idle schedulable RAM is committed to future
+   placements; lending it to a boost risks the OOM the reservation exists to prevent.
+
+Worked example (the motivating case): a 32 GB node with a 16 GB reservation hosting a
+job that needs +6 GB and one that needs +10 GB lets both bootstrap concurrently (6+10 =
+16 ≤ 16). Two +6 GB jobs on a node with an 8 GB reservation must serialise (6+6 > 8) even
+though bin-packing space is momentarily free — by design.
+
+**Prior art — do not reinvent.** This was already implemented in BSIM-E17 and then
+stranded when later work branched from a pre-E17 base. `origin/main`'s
+`batch_sim/scheduler/k8s_plus_scheduler.py` (commit `15e22e0`, also on the
+`feature/bsim-e17-k8splus-multipool` branch) wires `NodeBurstPool` into the mainline
+runner — `burst_pool.acquire(peak)` / `.release()` gating Phase 2, a `self._burst_pools`
+dict, and a comment stating "NodeBurstPool with headroom fixed at `daemonset_headroom_gb`
+(not workload-derived)" — i.e. it already used correction #1 (pool sized to the fixed
+reservation). Port/adapt that implementation onto the current tier-based scheduler rather
+than rebuilding from scratch; the differences are: source the headroom from tier
+`spike_max_gb` instead of `daemonset_headroom_gb`, and apply the no-borrow invariant (#2).
+
+**Acceptance Criteria:**
+- `K8SPlusScheduler` Phase-2 admission uses `NodeBurstPool` sized to the node's tier
+  `spike_max_gb` (legacy/no-tier mode: sized to the derived spike headroom)
+- Two jobs whose combined burst ≤ reservation boost concurrently; a pair whose combined
+  burst > reservation serialises
+- A boost request never consumes schedulable (bin-packing) RAM, even when idle
+- No-boost tier (`spike_max_gb=0`, BSIM-113) → pool admits at most a mutex's worth (or
+  rejects positive-burst jobs upstream via admission control)
+- `SEMAPHORE_WAIT` metric still emitted for serialised bursts
+- Regression: a tier whose reservation comfortably exceeds combined bursts shows no
+  serialisation where the old count-based semaphore would have forced a mutex

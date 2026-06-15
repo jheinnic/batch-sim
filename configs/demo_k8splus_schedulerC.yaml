@@ -47,6 +47,7 @@ provisioner:
     - m7i.16xlarge   #  64 vCPU  254 GB sch  $3.226/hr  — many medium jobs
     - r7i.4xlarge    #  16 vCPU  126 GB sch  $1.008/hr  — heavy jobs ≤128 GB
     - r7i.8xlarge    #  32 vCPU  254 GB sch  $2.016/hr  — heavy jobs ≤256 GB
+    - r7i.16xlarge   #  64 vCPU  510 GB sch  $?.???/hr  — heavy jobs ≤512 GB
 
   # Node lifecycle TTLs
   empty_ttl_s: 30              # terminate 30 s after node empties
@@ -56,3 +57,125 @@ provisioner:
 
   # Active consolidation
   consolidation_threshold_pct: 30.0  # consolidate if < 30 % utilised post-job
+
+storage:
+  initial_volume_count: 2
+  volume_size_gb: 1024
+  expansion_trigger_pct: 0.85
+  ebs_price_per_gb_hour: 0.0001096
+
+tiers:
+  - name: 1r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.xlarge
+  - name: 2r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.2xlarge
+  - name: 2m8
+    spike_max_gb: 8
+    spawn_instance_class: m7i.2xlarge
+  - name: 4r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m8
+    spike_max_gb: 8
+    spawn_instance_class: m7i.4xlarge
+  - name: 4c8
+    spike_max_gb: 8
+    spawn_instance_class: c7i.4xlarge
+
+  - name: 1r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.xlarge
+  - name: 2r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.2xlarge
+  - name: 2m14
+    spike_max_gb: 14
+    spawn_instance_class: m7i.2xlarge
+  - name: 4r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m14
+    spike_max_gb: 14
+    spawn_instance_class: m7i.4xlarge
+  - name: 4c14
+    spike_max_gb: 14
+    spawn_instance_class: c7i.4xlarge
+
+  - name: 2r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.2xlarge
+  - name: 4r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m30
+    spike_max_gb: 30
+    spawn_instance_class: m7i.4xlarge
+  - name: 8r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m30
+    spike_max_gb: 30
+    spawn_instance_class: m7i.8xlarge
+  - name: 8c30
+    spike_max_gb: 30
+    spawn_instance_class: c7i.8xlarge
+
+  - name: 4r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.4xlarge
+  - name: 8r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m62
+    spike_max_gb: 62
+    spawn_instance_class: m7i.8xlarge
+  - name: 16r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m62
+    spike_max_gb: 62
+    spawn_instance_class: m7i.16xlarge
+  - name: 16c62
+    spike_max_gb: 62
+    spawn_instance_class: c7i.16xlarge
+
+  - name: 4r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.4xlarge
+  - name: 8r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m92
+    spike_max_gb: 92
+    spawn_instance_class: m7i.8xlarge
+  - name: 16r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m92
+    spike_max_gb: 92
+    spawn_instance_class: m7i.16xlarge
+  - name: 16c92
+    spike_max_gb: 92
+    spawn_instance_class: c7i.16xlarge
+
+  - name: 8r126
+    spike_max_gb: 126
+    spawn_instance_class: r7i.8xlarge
+  - name: 16r126
+    spike_max_gb: 126
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m126
+    spike_max_gb: 126
+    spawn_instance_class: m7i.16xlarge
+
+  - name: 8r162
+    spike_max_gb: 162
+    spawn_instance_class: r7i.8xlarge
+  - name: 16r162
+    spike_max_gb: 162
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m162
+    spike_max_gb: 162
+    spawn_instance_class: m7i.16xlarge
