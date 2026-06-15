@@ -272,14 +272,14 @@ class SimulationConfig(BaseModel):
     horizon_seconds: PositiveFloat
     random_seed: int = 42
     network_bandwidth_mbps: PositiveFloat = 500.0
-    cooloff_seconds: float = Field(
+    cool_off_seconds: float = Field(
         default=0.0, ge=0.0,
         description=(
             "Extra simulation time after horizon_seconds during which "
             "no new jobs arrive but running jobs are allowed to finish. "
             "Prevents horizon truncation of jobs that start near the end "
             "of the arrival window. Total sim duration = "
-            "horizon_seconds + cooloff_seconds."
+            "horizon_seconds + cool_off_seconds."
         )
     )
     centroids: list[CentroidConfig] = Field(..., min_length=1)
@@ -406,6 +406,66 @@ class TimeWindowPolicy(BaseModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# BSIM-E18: Karpenter-style provisioner (replaces time_window_policy)
+# ---------------------------------------------------------------------------
+
+class KarpenterProvisioner(BaseModel):
+    """
+    Workload-reactive node provisioner modelled on Karpenter semantics.
+
+    Instance selection: at scale-out time, scores every allowed instance type
+    by jobs-covered-per-dollar-per-hour against the live queue, then picks the
+    highest-scoring type.  Naturally upsizes under load and downsizes when only
+    a handful of jobs are pending — no calendar-based rules required.
+
+    Node lifecycle: three orthogonal TTL timers replace the multi-threshold
+    drain rules of the time-window policy:
+      empty_ttl_s         — terminate this many seconds after the last job leaves
+      underutilize_ttl_s  — drain when utilisation < underutilize_threshold_pct
+                            for this many consecutive seconds
+      max_node_ttl_s      — hard lifetime cap (Karpenter expireAfter); prevents
+                            node hoarding regardless of utilisation
+
+    Consolidation: after each job completes, if the node's utilisation drops
+    below consolidation_threshold_pct AND another ready node has enough spare
+    capacity to absorb the remaining load, the node enters DRAINING immediately
+    rather than waiting for a TTL to fire.
+    """
+    allowed_instance_types: list[str] = Field(
+        ..., min_length=1,
+        description="Instance type names the provisioner may launch. "
+                    "Must match names in the instance registry.",
+    )
+    empty_ttl_s: PositiveFloat = Field(
+        default=30.0,
+        description="Seconds after a node empties before it is terminated. "
+                    "Analogous to Karpenter consolidateAfter=WhenEmpty.",
+    )
+    underutilize_threshold_pct: NonNegativeFloat = Field(
+        default=30.0, le=100.0,
+        description="vCPU utilisation percentage below which the "
+                    "underutilisation timer starts accruing.",
+    )
+    underutilize_ttl_s: PositiveFloat = Field(
+        default=300.0,
+        description="Seconds a node must stay below underutilize_threshold_pct "
+                    "(while still running jobs) before it enters DRAINING. "
+                    "Analogous to Karpenter consolidateAfter=WhenUnderutilized.",
+    )
+    max_node_ttl_s: PositiveFloat = Field(
+        default=3600.0,
+        description="Hard node lifetime cap from READY time. "
+                    "Analogous to Karpenter expireAfter.",
+    )
+    consolidation_threshold_pct: NonNegativeFloat = Field(
+        default=40.0, le=100.0,
+        description="If a node's utilisation drops below this percentage after "
+                    "a job completes AND its remaining jobs fit on another node, "
+                    "it enters DRAINING immediately (active consolidation).",
+    )
+
+
 class SchedulerConfig(BaseModel):
     scheduler_type: SchedulerType
     panic_threshold_seconds: PositiveFloat = 300.0
@@ -416,6 +476,14 @@ class SchedulerConfig(BaseModel):
     max_retries: PositiveInt = 3
     replay_delay_seconds: NonNegativeFloat = 10.0
     k8s_os_overhead_gb: NonNegativeFloat = 2.0
+    provisioner: KarpenterProvisioner | None = Field(
+        default=None,
+        description=(
+            "BSIM-E18: Karpenter-style workload-reactive provisioner. "
+            "When present, replaces time_window_policy with demand-scored "
+            "instance selection and three-TTL node lifecycle management."
+        ),
+    )
     time_window_policy: list[TimeWindowPolicy] | None = Field(
         default=None,
         description=(
@@ -423,6 +491,20 @@ class SchedulerConfig(BaseModel):
             "When present, partitions the 24-hour day into windows that each "
             "define memory-band queues with explicit instance classes and drain rules. "
             "When absent, the scheduler uses its default instance-selection behavior."
+        ),
+    )
+    scale_out_threshold_s: NonNegativeFloat = Field(
+        default=0.0,
+        description=(
+            "BSIM-86: Minimum queue-wait time (seconds) before the scale-out monitor "
+            "provisions a new node. 0 = provision immediately for any unplaceable job."
+        ),
+    )
+    scale_out_poll_s: PositiveFloat = Field(
+        default=60.0,
+        description=(
+            "BSIM-86: Polling interval (seconds) for the scale-out monitor. "
+            "Also serves as the cool_down period after each node launch."
         ),
     )
 

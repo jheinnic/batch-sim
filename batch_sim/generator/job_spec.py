@@ -19,14 +19,15 @@ class PhaseProfile:
     download_duration_s: float
     download_ram_gb: float = 0.5
     preprocess_duration_s: float = 0.0
-    preprocess_peak_ram_gb: float = 0.0
-    preprocess_steady_ram_gb: float = 0.0
+    preprocess_peak_ram_gb: float = 0.0   # bin_preloader_hard_limit_gb  → K8S memory limit
+    preprocess_steady_ram_gb: float = 0.0  # bin_preloader_actual_gb draw → actual preload usage
     preprocess_vcpu: float = 1.0
     stages: List[Stage] = field(default_factory=list)
     workhorse_duration_s: float = 0.0
     workhorse_peak_vcpu: float = 0.0
     workhorse_declared_vcpu: int = 0
-    workhorse_ram_gb: float = 0.0
+    workhorse_hard_limit_gb: float = 0.0  # bin_steady_state_hard_limit_gb → K8S memory request
+    workhorse_ram_gb: float = 0.0          # bin_steady_state_actual_gb draw → actual WH usage
     upload_duration_s: float = 0.0
     upload_ram_gb: float = 0.5
 
@@ -41,7 +42,9 @@ class PhaseProfile:
 
     @property
     def soft_limit_ram_gb(self) -> float:
-        return self.preprocess_steady_ram_gb
+        # K8S resources.requests.memory: the developer-declared steady-state cap.
+        # Falls back to preprocess_steady_ram_gb for Pareto-path profiles (no bin hard limit).
+        return self.workhorse_hard_limit_gb if self.workhorse_hard_limit_gb > 0 else self.preprocess_steady_ram_gb
 
 
 @dataclass
@@ -120,6 +123,7 @@ def build_phase_profile(
         workhorse_duration_s=workhorse_total_s,
         workhorse_peak_vcpu=max_effective,
         workhorse_declared_vcpu=max_declared,
+        workhorse_hard_limit_gb=steady_ram_gb,
         workhorse_ram_gb=steady_ram_gb,
         upload_duration_s=upload_duration_s,
     )

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 class EventType(str, Enum):
@@ -51,54 +51,58 @@ class SimEvent:
 
 
 class MetricsCollector:
-    def __init__(self): self._log: list[SimEvent] = []
-    def record(self, event: SimEvent): self._log.append(event)
+    def __init__(self) -> None: self._log: list[SimEvent] = []
+    def record(self, event: SimEvent) -> None: self._log.append(event)
     @property
-    def log(self): return self._log
-    def events_of_type(self, t): return [e for e in self._log if e.event_type == t]
+    def log(self) -> list[SimEvent]: return self._log
+    def events_of_type(self, t: EventType) -> list[SimEvent]:
+        return [e for e in self._log if e.event_type == t]
 
-    def save(self, path):
+    def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump([{"event_type": e.event_type.value,
                         "sim_time": e.sim_time, "data": e.data} for e in self._log], f, indent=2)
 
-    def job_arrival(self, t, job_id, centroid_id):
+    def job_arrival(self, t: float, job_id: str, centroid_id: str) -> None:
         self.record(SimEvent(EventType.JOB_ARRIVAL, t, {"job_id": job_id, "centroid_id": centroid_id}))
-    def job_queued(self, t, job_id, centroid_id, priority):
+    def job_queued(self, t: float, job_id: str, centroid_id: str, priority: str) -> None:
         self.record(SimEvent(EventType.JOB_QUEUED, t, {"job_id": job_id, "centroid_id": centroid_id, "priority": priority}))
-    def job_start(self, t, job_id, centroid_id, node_id):
+    def job_start(self, t: float, job_id: str, centroid_id: str, node_id: str) -> None:
         self.record(SimEvent(EventType.JOB_START, t, {"job_id": job_id, "centroid_id": centroid_id, "node_id": node_id}))
-    def phase_transition(self, t, job_id, phase, node_id):
+    def phase_transition(self, t: float, job_id: str, phase: PhaseID, node_id: str) -> None:
         self.record(SimEvent(EventType.PHASE_TRANSITION, t, {"job_id": job_id, "phase": phase.value, "node_id": node_id}))
-    def job_complete(self, t, job_id, centroid_id, node_id, queue_wait_s, total_elapsed_s, retry_count):
+    def job_complete(self, t: float, job_id: str, centroid_id: str, node_id: str,
+                     queue_wait_s: float, total_elapsed_s: float, retry_count: int) -> None:
         self.record(SimEvent(EventType.JOB_COMPLETE, t, {"job_id": job_id, "centroid_id": centroid_id,
             "node_id": node_id, "queue_wait_s": queue_wait_s,
             "total_elapsed_s": total_elapsed_s, "retry_count": retry_count}))
-    def job_crash(self, t, job_id, centroid_id, node_id, retry_count, reason):
+    def job_crash(self, t: float, job_id: str, centroid_id: str, node_id: str,
+                  retry_count: int, reason: str) -> None:
         self.record(SimEvent(EventType.JOB_CRASH, t, {"job_id": job_id, "centroid_id": centroid_id,
             "node_id": node_id, "retry_count": retry_count, "reason": reason}))
-    def job_terminal(self, t, job_id, centroid_id):
+    def job_terminal(self, t: float, job_id: str, centroid_id: str) -> None:
         self.record(SimEvent(EventType.JOB_TERMINAL, t, {"job_id": job_id, "centroid_id": centroid_id}))
-    def panic_trigger(self, t, job_id, wait_s):
+    def panic_trigger(self, t: float, job_id: str, wait_s: float) -> None:
         self.record(SimEvent(EventType.PANIC_TRIGGER, t, {"job_id": job_id, "wait_s": wait_s}))
-    def burst_collision(self, t, node_id, job_ids, victim_id, aggregate_ram_gb, node_ram_gb):
+    def burst_collision(self, t: float, node_id: str, job_ids: list[str], victim_id: str,
+                        aggregate_ram_gb: float, node_ram_gb: float) -> None:
         self.record(SimEvent(EventType.BURST_COLLISION, t, {"node_id": node_id, "job_ids": job_ids,
             "victim_id": victim_id, "aggregate_ram_gb": aggregate_ram_gb, "node_ram_gb": node_ram_gb}))
-    def node_launching(self, t, node_id, instance_name):
+    def node_launching(self, t: float, node_id: str, instance_name: str) -> None:
         self.record(SimEvent(EventType.NODE_LAUNCHING, t, {"node_id": node_id, "instance_name": instance_name}))
-    def node_ready(self, t, node_id, instance_name):
+    def node_ready(self, t: float, node_id: str, instance_name: str) -> None:
         self.record(SimEvent(EventType.NODE_READY, t, {"node_id": node_id, "instance_name": instance_name}))
-    def node_idle(self, t, node_id):
+    def node_idle(self, t: float, node_id: str) -> None:
         self.record(SimEvent(EventType.NODE_IDLE, t, {"node_id": node_id}))
-    def node_draining(self, t, node_id, drain_rule_idle_vcpu=None):
+    def node_draining(self, t: float, node_id: str, drain_rule_idle_vcpu: Optional[float] = None) -> None:
         self.record(SimEvent(EventType.NODE_DRAINING, t, {
             "node_id": node_id,
             **({"drain_rule_idle_vcpu": drain_rule_idle_vcpu} if drain_rule_idle_vcpu is not None else {})
         }))
-    def node_terminated(self, t, node_id, idle_duration_s):
+    def node_terminated(self, t: float, node_id: str, idle_duration_s: float) -> None:
         self.record(SimEvent(EventType.NODE_TERMINATED, t, {"node_id": node_id, "idle_duration_s": idle_duration_s}))
-    def policy_swap(self, t, old_start_s, new_start_s):
+    def policy_swap(self, t: float, old_start_s: float, new_start_s: float) -> None:
         self.record(SimEvent(EventType.POLICY_SWAP, t, {
             "old_window_start_s": old_start_s,
             "new_window_start_s": new_start_s,

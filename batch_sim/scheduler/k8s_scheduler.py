@@ -46,6 +46,7 @@ class K8SScheduler:
             windows = sorted(self.cfg.time_window_policy, key=lambda w: w.start_time_s)
             self._active_window_idx = self._find_window_idx(env.now % 86400.0, windows)
             env.process(self._policy_timer(env, windows))
+        env.process(self._scale_out_monitor(env))
 
     # -----------------------------------------------------------------------
     # BSIM-84: time-window helpers
@@ -175,11 +176,6 @@ class K8SScheduler:
         proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
         self._panic_monitors[job.job_id] = proc
         self._try_schedule(env)
-        # Proactive provisioning: launch immediately if the cluster has no active capacity.
-        # Prevents a cold cluster from waiting the full panic_threshold before any job runs.
-        if not any(n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
-                   for n in self._nodes.values()):
-            self.guarantee_capacity(env, job)
 
     def on_job_complete(self, env, node, job):
         soft = job.profile.soft_limit_ram_gb
@@ -318,6 +314,57 @@ class K8SScheduler:
             self._drain_monitors[node_id] = proc
 
         self._try_schedule(env)
+
+    def _scale_out_monitor(self, env):
+        """
+        Polling coroutine: when the oldest queued job has waited at least
+        cfg.scale_out_threshold_s, calls _provision_to_demand to launch nodes
+        for the entire queue at once, then sleeps cfg.scale_out_poll_s.
+        """
+        while True:
+            if not self._queue:
+                yield env.timeout(self.cfg.scale_out_poll_s)
+                continue
+
+            oldest_wait = max(env.now - e.enqueue_time for e in self._queue._heap)
+            remaining = self.cfg.scale_out_threshold_s - oldest_wait
+
+            if remaining > 0:
+                yield env.timeout(remaining)
+            else:
+                self._provision_to_demand(env)
+                yield env.timeout(self.cfg.scale_out_poll_s)
+
+    def _provision_to_demand(self, env):
+        """
+        Greedy first-fit over the full queue: for each queued job that cannot
+        fit into any existing (READY or LAUNCHING) node's remaining K8S capacity,
+        launch a new node via _select_instance_for_job and add its residual to
+        the virtual pool. The time-window spawn_rate_per_min cooldown in
+        _select_instance_for_job naturally caps how many launch in one call.
+        """
+        virtual = []
+        for n in self._nodes.values():
+            if n.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING):
+                cap = self._capacity_cache.get(n.instance.name)
+                if cap and cap.effective_schedulable_gb > 0:
+                    virtual.append([cap.effective_schedulable_gb - n.allocated_ram_gb,
+                                     n.physical_vcpu - n.allocated_vcpu])
+        for entry in sorted(self._queue._heap):
+            job = entry.job; p = job.profile
+            soft = p.soft_limit_ram_gb
+            vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
+            for vn in virtual:
+                if vn[0] >= soft and vn[1] >= vcpu:
+                    vn[0] -= soft; vn[1] -= vcpu
+                    break
+            else:
+                instance = self._select_instance_for_job(job)
+                if instance:
+                    cap = self._k8s_capacity(instance)
+                    env.process(self._launch_node(env, instance))
+                    virtual.append([cap.effective_schedulable_gb - soft,
+                                     instance.vcpu - vcpu])
 
     def _panic_monitor(self, env, job, enqueue_time):
         try: yield env.timeout(self.cfg.panic_threshold_seconds)

@@ -1,5 +1,5 @@
 scheduler_type: k8s
-panic_threshold_seconds: 9000
+panic_threshold_seconds: 640
 sla_target_seconds: 6000
 warmup_delay_seconds: 30
 idle_timeout_seconds: 120
@@ -7,3 +7,5 @@ idle_check_interval_seconds: 30
 max_retries: 3
 replay_delay_seconds: 120
 k8s_os_overhead_gb: 2.0
+scale_out_threshold_s: 300.0   # seconds a job must wait before scale-out fires (0 = immediate)
+scale_out_poll_s: 60.0       # cool_down between successive node launches

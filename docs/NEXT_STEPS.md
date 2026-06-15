@@ -43,7 +43,7 @@ Fix: replace `int(np.clip(round(t * pm()), 1, 64))` with `list(centroid.workhors
 - `workhorse_soft_vcpu: list[int] | None` — new: minimum vCPU guarantee per stage
 - `burst_size_min: int = 1` — new: jobs per burst event (min)
 - `burst_size_max: int = 1` — new: jobs per burst event (max)
-- `cooloff_seconds: float = 0.0` — new: extra runtime after horizon for in-flight jobs
+- `cool_off_seconds: float = 0.0` — new: extra runtime after horizon for in-flight jobs
 - `pareto_multiplier_min: float = 0.25` — new: per-centroid Pareto clamp
 - `pareto_multiplier_max: float = 4.0` — new: per-centroid Pareto clamp
 - `workhorse_io_wait_per_stage: list[float] | None` — new: per-stage I/O wait
@@ -66,10 +66,10 @@ Fix: replace `int(np.clip(round(t * pm()), 1, 64))` with `list(centroid.workhors
 - `JobArrivalEvent` has new fields: `soft_cpu: int = 0`, `hard_cpu: int = 0`
 - `to_job_spec()` carries `soft_cpu` and `hard_cpu` through
 - `_event_from_job()` copies them from the sampled job
-- Metadata now includes `cooloff_seconds` and `burst_params`
+- Metadata now includes `cool_off_seconds` and `burst_params`
 
 **`batch_sim/core/engine.py`**:
-- `SimulationEngine.run()` accepts `cooloff_seconds: float = 0.0`
+- `SimulationEngine.run()` accepts `cool_off_seconds: float = 0.0`
 - `RunningJobSlot` has new field `soft_limit_ram_gb: float = 0.0`
 - `NodeModel` has new field `spike_headroom_gb_at_launch: float = 0.0`
 - `NodeModel.add_job()` accepts `soft_limit_gb=0.0`
@@ -111,7 +111,7 @@ Hybrid OKD Q1 + Batch Q2 router and sweep runner.
 
 **`batch_sim/experiment_runner.py`**:
 - `run_one()` accepts `return_metrics=False`; when True returns `(Scorecard, MetricsCollector)`
-- Passes `cooloff_seconds` from event list metadata to `engine.run()`
+- Passes `cool_off_seconds` from event list metadata to `engine.run()`
 
 **`batch_sim/__main__.py`** (simulate command):
 - Calls `run_one(..., return_metrics=True)`
@@ -162,7 +162,7 @@ reduce this, but needs verification after wiring is complete.
 ## Config changes (already on origin)
 
 - `network_bandwidth_mbps: 10000` (was 500) across all configs
-- `cooloff_seconds: 3600` in all configs
+- `cool_off_seconds: 3600` in all configs
 - `workhorse_hard_vcpu` and `workhorse_soft_vcpu` arrays in jch_centroids_v01.yaml
 - `workhorse_hard_vcpu` replaces `workhorse_thread_counts` everywhere
 - Instance registry thinned to ≥128GB only (jch_instance_registry.yaml)

@@ -1,20 +1,29 @@
 from __future__ import annotations
 import json, random
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.console import Console
 from batch_sim.core.schemas import SchedulerType
 from batch_sim.core.engine import SimulationEngine
-from batch_sim.generator.event_list import load_event_list
+from batch_sim.generator.event_list import EventList, load_event_list
 from batch_sim.metrics.collector import MetricsCollector
-from batch_sim.metrics.aggregator import build_scorecard
+from batch_sim.metrics.aggregator import Scorecard, build_scorecard
+from batch_sim.registry.instance_registry import InstanceRegistry
+from batch_sim.scheduler.k8s_scheduler import K8SScheduler
 
 console = Console()
 
 
-def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
-            seed=42, return_metrics=False):
+def run_one(
+    event_list: EventList,
+    scheduler_type: SchedulerType,
+    cfg: Any,
+    registry: InstanceRegistry,
+    event_list_path: str | Path,
+    seed: int = 42,
+    return_metrics: bool = False,
+) -> Union[Scorecard, tuple[Scorecard, MetricsCollector]]:
     """Run one scheduler configuration and return a Scorecard.
     If return_metrics=True, returns (Scorecard, MetricsCollector) instead.
     """
@@ -24,7 +33,6 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
         scheduler = BatchScheduler(cfg=cfg, registry=registry, metrics=metrics, rng=rng)
     elif (scheduler_type == SchedulerType.K8S):
         centroid_peak_rams = list({e.preprocess_peak_ram_gb for e in event_list.events})
-        from batch_sim.scheduler.k8s_scheduler import K8SScheduler
         scheduler = K8SScheduler(cfg=cfg, registry=registry, metrics=metrics,
                                  centroid_peak_rams=centroid_peak_rams, rng=rng)
     elif (scheduler_type == SchedulerType.K8SPLUS):
@@ -32,11 +40,16 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
         from batch_sim.scheduler.k8s_plus_scheduler import K8SPlusScheduler
         scheduler = K8SPlusScheduler(cfg=cfg, registry=registry, metrics=metrics,
                                  centroid_peak_rams=centroid_peak_rams, rng=rng)
+    else:
+        raise ValueError(f"Unknown scheduler type: {scheduler_type}")
     engine = SimulationEngine(scheduler=scheduler, metrics=metrics, cfg=cfg)
-    cooloff = event_list.metadata.get("cooloff_seconds", 0.0)
-    engine.run(event_list, cooloff_seconds=cooloff)
+    cool_off = event_list.metadata.get("cool_off_seconds", 0.0)
+    engine.run(event_list, cool_off_seconds=cool_off)
     scheduler.finalize(engine.env)
-    k8s_cap = scheduler.capacity_report() if scheduler_type == SchedulerType.K8S and hasattr(scheduler, "capacity_report") else None
+    if isinstance(scheduler, K8SScheduler):
+        k8s_cap = scheduler.capacity_report()
+    else:
+        k8s_cap = None
     sim_horizon = event_list.metadata.get("horizon_seconds", 0)
     sc = build_scorecard(scheduler_type=scheduler_type.value,
         panic_threshold_s=cfg.panic_threshold_seconds, event_list_path=event_list_path,
@@ -46,11 +59,18 @@ def run_one(event_list, scheduler_type, cfg, registry, event_list_path,
     return (sc, metrics) if return_metrics else sc
 
 
-def run_experiment(event_list_path, panic_threshold_values, base_cfg, registry,
-                   output_dir, schedulers=None, seed=42):
-    if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S, SchedulerType.K8SPlus]
+def run_experiment(
+    event_list_path: str | Path,
+    panic_threshold_values: list[float],
+    base_cfg: Any,
+    registry: InstanceRegistry,
+    output_dir: str | Path,
+    schedulers: Optional[list[SchedulerType]] = None,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S, SchedulerType.K8SPLUS]
     output_dir = Path(output_dir); event_list = load_event_list(event_list_path)
-    collated = []
+    collated: list[dict[str, Any]] = []
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
                   BarColumn(), TextColumn("{task.completed}/{task.total}"),
                   TimeElapsedColumn(), console=console) as progress:
@@ -62,6 +82,7 @@ def run_experiment(event_list_path, panic_threshold_values, base_cfg, registry,
                 progress.update(task, description=f"[{sched_type.value.upper():5s}] {threshold:.0f}s")
                 sc = run_one(event_list=event_list, scheduler_type=sched_type, cfg=cfg,
                              registry=registry, event_list_path=event_list_path, seed=seed)
+                assert isinstance(sc, Scorecard)
                 run_dir = output_dir / sched_type.value / f"threshold_{int(threshold)}"
                 sc.save(run_dir / "scorecard.json")
                 collated.append({"scheduler": sched_type.value, "panic_threshold_s": threshold,
@@ -78,7 +99,7 @@ def run_experiment(event_list_path, panic_threshold_values, base_cfg, registry,
     return collated
 
 
-def build_pareto_frontier(collated, scheduler):
+def build_pareto_frontier(collated: list[dict[str, Any]], scheduler: str) -> list[dict[str, Any]]:
     runs = [r for r in collated if r["scheduler"] == scheduler]
     frontier = []
     for candidate in runs:
@@ -93,8 +114,8 @@ def build_pareto_frontier(collated, scheduler):
     return frontier
 
 
-def detect_meta_effect(collated):
-    result = {}
+def detect_meta_effect(collated: list[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
     for sched in ("batch", "k8s"):
         runs = sorted([r for r in collated if r["scheduler"] == sched],
                       key=lambda r: r["panic_threshold_s"])

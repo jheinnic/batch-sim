@@ -30,5 +30,11 @@ batch-sim = "batch_sim.__main__:cli"
 where = ["."]
 include = ["batch_sim*"]
 
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+include = ["batch_sim"]
+exclude = ["scripts", ".venv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

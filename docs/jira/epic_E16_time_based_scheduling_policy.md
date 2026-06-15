@@ -81,6 +81,90 @@ new policy's `spawn_instance_class`.
 
 ---
 
+## BSIM-91 — Policy: document 24 h cycling and add multi-interval window support
+
+**Type:** Task | **Priority:** Low | **Status:** To Do
+**Depends on:** BSIM-83, BSIM-84
+
+**Background:**
+Two related gaps surfaced after BSIM-83/84 shipped:
+
+**Gap 1 — undocumented cycling behaviour.**
+The scheduler uses `env.now % 86400.0` throughout `_find_window_idx` and
+`_policy_timer`.  For simulations longer than 24 hours (e.g. a 48 h stress
+test) the policy therefore repeats automatically, which is the correct and
+expected behaviour.  However, nothing in the schema docstring, the reference
+YAML (`jch_policy_reference.yaml`), or the BSIM-83 acceptance criteria
+mentions this.  Authors writing multi-day configs have no way to know the
+policy cycles, and a careless reader might assume the last window's drain
+rules remain in force for the rest of an extended run.
+
+**Gap 2 — symmetric off-peak periods require repeated definitions.**
+The current schema requires every `TimeWindowPolicy` to be a single
+`[start_time_s, end_time_s)` span, and all spans must be contiguous with no
+gaps.  When off-peak hours fall on both sides of a peak block (e.g. midnight–
+8 am and 8 pm–midnight share the same queue config), operators must repeat the
+identical queue definition twice:
+
+```yaml
+# Today: two definitions, same content
+- start_time_s: 0       end_time_s: 28800    # midnight–8am
+  queues: [...]                               # copy A
+- start_time_s: 72000   end_time_s: 86400    # 8pm–midnight
+  queues: [...]                               # copy B  ← identical to A
+```
+
+The original design intent was to allow a single window definition to cover
+multiple non-contiguous intervals — eliminating copy-paste and the drift risk
+when one copy is updated but not the other:
+
+```yaml
+# Proposed: one definition, multiple intervals
+- intervals:
+    - {start_time_s: 0,     end_time_s: 28800}   # midnight–8am
+    - {start_time_s: 72000, end_time_s: 86400}   # 8pm–midnight
+  queues: [...]
+```
+
+**Scope of this story:**
+
+1. **Document cycling** — add a note to `TimeWindowPolicy` docstring and to
+   `jch_policy_reference.yaml` / `demo_k8splus_scheduler.yaml` that the policy
+   repeats every 86400 s for multi-day simulations.
+
+2. **Multi-interval windows (schema)** — replace the single `start_time_s` /
+   `end_time_s` pair on `TimeWindowPolicy` with an `intervals` list of
+   `{start_time_s, end_time_s}` pairs.  A window with a single interval is
+   unchanged in meaning.  Validation rules update to:
+   - All intervals across all windows collectively cover [0, 86400) exactly
+   - No overlaps between any two intervals (within or across windows)
+   - Each interval must satisfy `end_time_s > start_time_s`
+
+3. **Multi-interval windows (scheduler)** — `_policy_timer` currently walks a
+   sorted list of single-boundary events.  Replace with a flat sorted list of
+   `(boundary_time, entering_window_or_None, leaving_window_or_None)` events so
+   the timer can handle non-contiguous windows correctly.  A gap between
+   intervals (e.g. 28800–72000) means no `TimeWindowPolicy` is active; fall
+   back to default instance selection for that period.
+
+4. **Backward compatibility** — configs using `start_time_s` / `end_time_s`
+   directly continue to parse.  During loading, a `TimeWindowPolicy` that has
+   `start_time_s` and `end_time_s` at the top level is silently normalised to
+   `intervals: [{start_time_s: ..., end_time_s: ...}]`.
+
+**Acceptance Criteria:**
+- Schema docstring and both reference YAMLs note 24 h cycling behaviour
+- A config with two windows sharing the same queue definition via `intervals`
+  passes validation and produces the same simulation output as the current
+  two-entry equivalent
+- Existing configs with flat `start_time_s` / `end_time_s` keys continue to
+  load without error or deprecation warning
+- `_policy_timer` handles a gap interval (no active window) without crashing
+- Regression: jch workload with `jch_policy_reference.yaml` produces identical
+  metrics before and after schema change
+
+---
+
 ## BSIM-85 — K8S scheduler: drain rule enforcement with DRAINING node state
 
 **Type:** Task | **Priority:** Medium | **Status:** To Do
