@@ -22,9 +22,15 @@ class EventType(str, Enum):
     NODE_IDLE        = "node_idle"
     NODE_DRAINING    = "node_draining"    # BSIM-85: node accepted no new jobs
     NODE_TERMINATED  = "node_terminated"
-    COST_SAMPLE      = "cost_sample"
-    CPU_WASTE        = "cpu_waste"     # BSIM-71: wasted vCPU-seconds per node
-    POLICY_SWAP      = "policy_swap"   # BSIM-84: time-window boundary crossed
+    COST_SAMPLE              = "cost_sample"
+    CPU_WASTE                = "cpu_waste"              # BSIM-71: wasted vCPU-seconds per node
+    POLICY_SWAP              = "policy_swap"            # BSIM-84: time-window boundary crossed
+    STORAGE_POOL_EXPANDED    = "storage_pool_expanded"  # BSIM-92: pool grew by one volume
+    STORAGE_EXHAUSTED        = "storage_exhausted"      # BSIM-92: volume ceiling reached
+    STORAGE_GEN_OPENED       = "storage_gen_opened"     # BSIM-93: new K8S pool generation
+    STORAGE_GEN_RELEASED     = "storage_gen_released"   # BSIM-93: K8S generation fully freed
+    ADMISSION_REJECTED       = "admission_rejected"     # BSIM-102/108: burst fits no compatible tier
+    TIER_COMPATIBILITY_WARN  = "tier_compatibility_warn" # BSIM-108: declared tier cannot host job burst
 
 
 class PhaseID(str, Enum):
@@ -66,8 +72,12 @@ class MetricsCollector:
 
     def job_arrival(self, t: float, job_id: str, centroid_id: str) -> None:
         self.record(SimEvent(EventType.JOB_ARRIVAL, t, {"job_id": job_id, "centroid_id": centroid_id}))
-    def job_queued(self, t: float, job_id: str, centroid_id: str, priority: str) -> None:
-        self.record(SimEvent(EventType.JOB_QUEUED, t, {"job_id": job_id, "centroid_id": centroid_id, "priority": priority}))
+    def job_queued(self, t: float, job_id: str, centroid_id: str, priority: str,
+                   queue_name: Optional[str] = None) -> None:
+        data: dict[str, Any] = {"job_id": job_id, "centroid_id": centroid_id, "priority": priority}
+        if queue_name is not None:
+            data["queue_name"] = queue_name
+        self.record(SimEvent(EventType.JOB_QUEUED, t, data))
     def job_start(self, t: float, job_id: str, centroid_id: str, node_id: str) -> None:
         self.record(SimEvent(EventType.JOB_START, t, {"job_id": job_id, "centroid_id": centroid_id, "node_id": node_id}))
     def phase_transition(self, t: float, job_id: str, phase: PhaseID, node_id: str) -> None:
@@ -106,4 +116,31 @@ class MetricsCollector:
         self.record(SimEvent(EventType.POLICY_SWAP, t, {
             "old_window_start_s": old_start_s,
             "new_window_start_s": new_start_s,
+        }))
+
+    def storage_pool_expanded(self, t: float, node_id: str, old_gb: float,
+                               new_gb: float, committed_gb: float, trigger_pct: float) -> None:
+        self.record(SimEvent(EventType.STORAGE_POOL_EXPANDED, t, {
+            "node_id": node_id, "old_gb": old_gb, "new_gb": new_gb,
+            "committed_gb": committed_gb, "trigger_pct": trigger_pct,
+        }))
+
+    def storage_exhausted(self, t: float, node_id: str,
+                           committed_gb: float, capacity_gb: float) -> None:
+        self.record(SimEvent(EventType.STORAGE_EXHAUSTED, t, {
+            "node_id": node_id, "committed_gb": committed_gb, "capacity_gb": capacity_gb,
+        }))
+
+    def storage_gen_opened(self, t: float, node_id: str, gen_id: int,
+                            capacity_gb: float, trigger_committed_pct: float) -> None:
+        self.record(SimEvent(EventType.STORAGE_GEN_OPENED, t, {
+            "node_id": node_id, "gen_id": gen_id,
+            "capacity_gb": capacity_gb, "trigger_committed_pct": trigger_committed_pct,
+        }))
+
+    def storage_gen_released(self, t: float, node_id: str, gen_id: int,
+                              capacity_gb: float, lifetime_s: float, jobs_served: int) -> None:
+        self.record(SimEvent(EventType.STORAGE_GEN_RELEASED, t, {
+            "node_id": node_id, "gen_id": gen_id, "capacity_gb": capacity_gb,
+            "lifetime_s": lifetime_s, "jobs_served": jobs_served,
         }))

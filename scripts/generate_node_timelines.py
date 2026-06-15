@@ -236,6 +236,27 @@ def run_and_extract(
                     e.data.get('hard_limit_waste', 0.0),
                 ))
 
+    # ── BSIM-94: per-node storage pool events ─────────────────────────────
+    # pool_expanded[nid]    = [(t, old_gb, new_gb)]
+    # pool_exhausted[nid]   = True
+    # pool_gen_events[nid]  = [(event_type_str, t, gen_id, capacity_gb)]
+    pool_expanded:   dict[str, list] = {}
+    pool_exhausted:  dict[str, bool] = {}
+    pool_gen_events: dict[str, list] = {}
+    for e in log:
+        nid = e.data.get('node_id')
+        if not nid:
+            continue
+        if e.event_type == EventType.STORAGE_POOL_EXPANDED:
+            pool_expanded.setdefault(nid, []).append(
+                (e.sim_time, e.data.get('old_gb', 0.0), e.data.get('new_gb', 0.0)))
+        elif e.event_type == EventType.STORAGE_EXHAUSTED:
+            pool_exhausted[nid] = True
+        elif e.event_type in (EventType.STORAGE_GEN_OPENED, EventType.STORAGE_GEN_RELEASED):
+            pool_gen_events.setdefault(nid, []).append((
+                e.event_type.value, e.sim_time,
+                e.data.get('gen_id', 0), e.data.get('capacity_gb', 0.0)))
+
     inst_map = {i.name: i for i in registry.all_types}
 
     # ── Per-job phase windows ──────────────────────────────────────────────
@@ -351,8 +372,12 @@ def run_and_extract(
                 for j in jobs_here
                 if j.get('phase_ram_gb') and j['phase_ram_gb'].get('preprocess', 0) > 0
             ]
-            if peak_rams_here:
-                _cap = compute_k8s_capacity(inst, peak_rams_here,
+            # BSIM-104: compute_k8s_capacity now takes a scalar spike_max_gb instead of
+            # a peak-RAM list. Reproduce the legacy chart value — the spike reservation
+            # is the largest observed preprocess peak that fits this instance.
+            fitting = [r for r in peak_rams_here if r <= inst.ram_gb - os_overhead_gb]
+            if fitting:
+                _cap = compute_k8s_capacity(inst, max(fitting),
                                             os_overhead_gb=os_overhead_gb)
                 eff_sch_gb      = round(_cap.effective_schedulable_gb, 2)
                 spike_headroom_gb = round(_cap.spike_headroom_gb, 2)
@@ -380,6 +405,9 @@ def run_and_extract(
             'cpu_waste_steps':        sorted(             # BSIM-82
                 node_cpu_waste.get(nid, []), key=lambda x: x[0]
             ),
+            'pool_expanded':          pool_expanded.get(nid, []),     # BSIM-94
+            'pool_exhausted':         pool_exhausted.get(nid, False), # BSIM-94
+            'pool_gen_events':        pool_gen_events.get(nid, []),   # BSIM-94
         }
 
     metadata = {
@@ -722,12 +750,21 @@ def _render_overview_page(
     ram_h   = 2.2
     cpu_h   = 1.6
     fig_w   = 18
+    has_storage_overview = any(
+        n.get('pool_expanded') or n.get('pool_gen_events')
+        for _, n in gantt_nodes
+    )
+    storage_h = 1.2 if has_storage_overview else 0
+    n_ov_panels = 3 + (1 if has_storage_overview else 0)
+    h_ratios_ov = [gantt_h, ram_h, cpu_h] + ([storage_h] if has_storage_overview else [])
+    total_ov_h  = gantt_h + ram_h + cpu_h + storage_h + 0.8
 
-    fig = plt.figure(figsize=(fig_w, gantt_h + ram_h + cpu_h + 0.8))
-    gs  = fig.add_gridspec(3, 1, height_ratios=[gantt_h, ram_h, cpu_h], hspace=0.06)
-    ax_gantt = fig.add_subplot(gs[0])
-    ax_usage = fig.add_subplot(gs[1], sharex=ax_gantt)
-    ax_cpu   = fig.add_subplot(gs[2], sharex=ax_gantt)
+    fig = plt.figure(figsize=(fig_w, total_ov_h))
+    gs  = fig.add_gridspec(n_ov_panels, 1, height_ratios=h_ratios_ov, hspace=0.06)
+    ax_gantt   = fig.add_subplot(gs[0])
+    ax_usage   = fig.add_subplot(gs[1], sharex=ax_gantt)
+    ax_cpu     = fig.add_subplot(gs[2], sharex=ax_gantt)
+    ax_ov_stor = fig.add_subplot(gs[3], sharex=ax_gantt) if has_storage_overview else None
 
     t_scale = (fig_w - 2) / t_span
 
@@ -866,14 +903,64 @@ def _render_overview_page(
         ax_cpu.set_facecolor('#fafaf9')
         ax_cpu.grid(True, axis='x', alpha=0.15)
 
+    # ── Pool-wide storage capacity panel (BSIM-94) ────────────────────
+    if ax_ov_stor is not None:
+        ax_cpu.tick_params(axis='x', labelbottom=False)
+        # Build Σ pool_capacity(t) step function from all nodes' expansion events
+        # Collect all unique event times across all nodes
+        all_stor_evts: list[tuple[float, float]] = []  # (t, delta_gb)
+        for _, nd in all_timelines.items():
+            expanded_nd = nd.get('pool_expanded', [])
+            gen_evts_nd = nd.get('pool_gen_events', [])
+            if gen_evts_nd:
+                for ev_type, t, gen_id, cap_gb in gen_evts_nd:
+                    if ev_type == 'storage_gen_opened':
+                        all_stor_evts.append((t, +cap_gb))
+                    elif ev_type == 'storage_gen_released':
+                        all_stor_evts.append((t, -cap_gb))
+            elif expanded_nd:
+                # Initial capacity delta at launch_t
+                init_cap  = expanded_nd[0][1]  # old_gb of first expansion
+                final_cap = expanded_nd[-1][2]  # new_gb of last expansion
+                launch = nd.get('launch_t', t_min)
+                term   = nd.get('term_t',   t_max)
+                all_stor_evts.append((launch, +init_cap))
+                for t_exp, old_gb, new_gb in expanded_nd:
+                    all_stor_evts.append((t_exp, +(new_gb - old_gb)))
+                all_stor_evts.append((term, -final_cap))
+        if all_stor_evts:
+            all_stor_evts.sort(key=lambda x: x[0])
+            ts_stor  = [t_min]
+            cap_stor = [0.0]
+            running  = 0.0
+            for t_ev, delta in all_stor_evts:
+                ts_stor.append(t_ev); cap_stor.append(running)
+                running += delta
+                ts_stor.append(t_ev); cap_stor.append(running)
+            ts_stor.append(t_max); cap_stor.append(running)
+            ts_stor_px = [(t - t_min) * t_scale for t in ts_stor]
+            ax_ov_stor.fill_between(ts_stor_px, cap_stor, step='post',
+                                    alpha=0.40, color='#00796b',
+                                    label=f'Σ pool capacity  (peak {max(cap_stor):.0f} GB)')
+            ax_ov_stor.step(ts_stor_px, cap_stor, where='post',
+                            color='#00695c', linewidth=1.2)
+            ax_ov_stor.set_ylabel('storage GB', fontfamily=FONT, fontsize=8, color='#00695c')
+            ax_ov_stor.tick_params(axis='y', labelsize=7, colors='#00695c')
+            ax_ov_stor.set_facecolor('#f0f8f5')
+            ax_ov_stor.grid(True, axis='x', alpha=0.15)
+            ax_ov_stor.legend(fontsize=7, loc='upper right', framealpha=0.9)
+
+    ax_bottom_ov = ax_ov_stor if ax_ov_stor is not None else ax_cpu
     tick_s = _nice_tick_seconds(t_span)
     ticks  = np.arange(0, t_span + tick_s, tick_s)
-    ax_cpu.set_xticks(ticks * t_scale)
-    ax_cpu.set_xticklabels(
+    ax_bottom_ov.set_xticks(ticks * t_scale)
+    ax_bottom_ov.set_xticklabels(
         [f'{t/60:.0f}m' for t in ticks], fontsize=8, fontfamily=FONT)
-    ax_cpu.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
+    ax_bottom_ov.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
+    if ax_ov_stor is None:
+        ax_cpu.set_xlabel('simulated time', fontfamily=FONT, fontsize=9)
 
-    fig.align_ylabels([ax_usage, ax_cpu])
+    fig.align_ylabels([ax_usage, ax_cpu] + ([ax_ov_stor] if ax_ov_stor else []))
     exts = ('png',) if png_only else ('png', 'svg')
     for ext in exts:
         fig.savefig(out / f'{filename}.{ext}', dpi=130, bbox_inches='tight')
@@ -955,6 +1042,116 @@ def chart_overview(
 
 
 # ---------------------------------------------------------------------------
+# BSIM-94: Storage band helpers
+# ---------------------------------------------------------------------------
+
+def _build_pool_capacity_steps(
+    node: dict, t_min: float, t_max: float,
+) -> tuple[list[float], list[float]]:
+    """Return (times, capacity_gb) step series for a single node's pool.
+
+    For the Batch single-pool model: starts at initial capacity (inferred from
+    the first STORAGE_POOL_EXPANDED 'old_gb'), jumps at each expansion.
+    For K8S generational: accumulated capacity across open generations.
+    Uses STORAGE_GEN_OPENED to add capacity and STORAGE_GEN_RELEASED to subtract.
+    Falls back to STORAGE_POOL_EXPANDED if no gen events.
+    """
+    gen_events = node.get('pool_gen_events', [])
+    expanded   = node.get('pool_expanded', [])
+
+    if gen_events:
+        # K8S generational path
+        ts: list[float]  = [t_min]
+        cap_series: list[float] = [0.0]
+        current_cap: dict[int, float] = {}  # gen_id → capacity
+        for ev_type, t, gen_id, cap_gb in sorted(gen_events, key=lambda x: x[1]):
+            total_before = sum(current_cap.values())
+            if ev_type == 'storage_gen_opened':
+                current_cap[gen_id] = cap_gb
+            elif ev_type == 'storage_gen_released':
+                current_cap.pop(gen_id, None)
+            total_after = sum(current_cap.values())
+            if total_before != total_after:
+                ts.append(t); cap_series.append(total_before)  # step down first
+                ts.append(t); cap_series.append(total_after)
+        ts.append(t_max); cap_series.append(sum(current_cap.values()))
+        return ts, cap_series
+
+    # Batch / single-pool path
+    if not expanded:
+        return [], []
+    # Infer initial capacity from first expansion's old_gb
+    initial_cap = expanded[0][1]   # old_gb at first expansion
+    ts    = [t_min, expanded[0][0]]
+    caps  = [initial_cap, initial_cap]
+    cur   = initial_cap
+    for t, old_gb, new_gb in expanded:
+        ts.append(t); caps.append(cur)
+        ts.append(t); caps.append(new_gb)
+        cur = new_gb
+    ts.append(t_max); caps.append(cur)
+    return ts, caps
+
+
+def _draw_storage_panel(
+    ax, node: dict, t_min: float, t_scale: float, scheduler_type: str,
+) -> None:
+    """Render pool capacity step function on ax."""
+    ts_raw, caps = _build_pool_capacity_steps(node, t_min, node['term_t'])
+    if not ts_raw:
+        ax.text(0.5, 0.5, 'no storage events', transform=ax.transAxes,
+                ha='center', va='center', fontsize=8, color='#888')
+        ax.set_yticks([])
+        return
+
+    ts_px = [(t - t_min) * t_scale for t in ts_raw]
+    gen_events = node.get('pool_gen_events', [])
+    is_gen = bool(gen_events)
+
+    if is_gen:
+        # Shade alternating generations
+        GEN_COLORS = ['#2e7d32', '#1565c0']
+        gen_spans: dict[int, list] = {}
+        for ev_type, t, gen_id, cap_gb in sorted(gen_events, key=lambda x: x[1]):
+            if ev_type == 'storage_gen_opened':
+                gen_spans[gen_id] = [t, None, cap_gb]
+            elif ev_type == 'storage_gen_released' and gen_id in gen_spans:
+                gen_spans[gen_id][1] = t
+        for gen_id, (t0, t1, cap_gb) in gen_spans.items():
+            if t1 is None:
+                t1 = node['term_t']
+            x0 = (t0 - t_min) * t_scale
+            x1 = (t1 - t_min) * t_scale
+            c  = GEN_COLORS[gen_id % len(GEN_COLORS)]
+            ax.axvspan(x0, x1, ymin=0, ymax=1, alpha=0.12, color=c)
+            ax.fill_between([x0, x1], [cap_gb, cap_gb], step='post',
+                            alpha=0.35, color=c, label=f'gen {gen_id}  ({cap_gb:.0f} GB)')
+            # Mark release with a vertical drop line
+            if gen_spans[gen_id][1] is not None:
+                rx = (gen_spans[gen_id][1] - t_min) * t_scale
+                ax.axvline(rx, color=c, linewidth=1.0, alpha=0.7, linestyle=':')
+    else:
+        ax.fill_between(ts_px, caps, step='post', alpha=0.40, color='#00796b',
+                        label=f'pool capacity  ({max(caps):.0f} GB peak)')
+        # Mark expansion events with vertical lines
+        for t, old_gb, new_gb in node.get('pool_expanded', []):
+            ex = (t - t_min) * t_scale
+            ax.axvline(ex, color='#00796b', linewidth=1.2, alpha=0.75)
+            ax.text(ex + 0.5, new_gb * 0.5, f'+{new_gb - old_gb:.0f}',
+                    fontsize=6, color='#00796b', va='center')
+
+    ax.step(ts_px, caps, where='post', color='#00695c', linewidth=1.3)
+    if node.get('pool_exhausted'):
+        ax.set_title('STORAGE EXHAUSTED', color='red', fontsize=7)
+    ax.set_ylabel('pool GB', fontfamily=FONT, fontsize=8, color='#00695c')
+    ax.tick_params(axis='y', labelsize=7, colors='#00695c')
+    ax.set_facecolor('#f0f8f5')
+    ax.grid(True, axis='x', alpha=0.15)
+    if not is_gen:
+        ax.legend(fontsize=6.5, loc='upper right', framealpha=0.9)
+
+
+# ---------------------------------------------------------------------------
 # Per-node detail chart
 # ---------------------------------------------------------------------------
 
@@ -991,16 +1188,21 @@ def chart_per_node(
     usage_h = 2.2
     waste_h = 1.8 if has_waste else 0
     fig_w   = 15
+    has_storage = bool(node.get('pool_expanded') or node.get('pool_gen_events'))
+    storage_h   = 1.4 if has_storage else 0
 
-    n_panels    = 3 if has_waste else 2
-    h_ratios    = [gantt_h, usage_h, waste_h] if has_waste else [gantt_h, usage_h]
-    total_h     = gantt_h + usage_h + waste_h + 0.6
+    n_panels    = 2 + (1 if has_waste else 0) + (1 if has_storage else 0)
+    h_ratios    = [gantt_h, usage_h] + ([waste_h] if has_waste else []) + ([storage_h] if has_storage else [])
+    total_h     = gantt_h + usage_h + waste_h + storage_h + 0.6
 
     fig = plt.figure(figsize=(fig_w, total_h))
     gs  = fig.add_gridspec(n_panels, 1, height_ratios=h_ratios, hspace=0.06)
-    ax_gantt = fig.add_subplot(gs[0])
-    ax_usage = fig.add_subplot(gs[1], sharex=ax_gantt)
-    ax_waste = fig.add_subplot(gs[2], sharex=ax_gantt) if has_waste else None
+    ax_gantt    = fig.add_subplot(gs[0])
+    ax_usage    = fig.add_subplot(gs[1], sharex=ax_gantt)
+    panel_idx   = 2
+    ax_waste    = fig.add_subplot(gs[panel_idx], sharex=ax_gantt) if has_waste else None
+    if has_waste: panel_idx += 1
+    ax_storage  = fig.add_subplot(gs[panel_idx], sharex=ax_gantt) if has_storage else None
 
     t_scale = (fig_w - 2.5) / t_span
 
@@ -1148,13 +1350,18 @@ def chart_per_node(
         ax_usage.set_facecolor('#fafaf9')
         ax_usage.grid(True, axis='x', alpha=0.18)
 
-    # ── Bottom panel: stacked CPU waste (BSIM-82) ─────────────────────
+    # ── CPU waste panel (BSIM-82) ─────────────────────────────────────
     if ax_waste is not None:
         _draw_cpu_waste_panel(ax_waste, node, t_min, t_scale)
         ax_waste.tick_params(axis='x', labelbottom=False)
 
+    # ── Storage band panel (BSIM-94) ──────────────────────────────────
+    if ax_storage is not None:
+        _draw_storage_panel(ax_storage, node, t_min, t_scale, scheduler_type)
+        ax_storage.tick_params(axis='x', labelbottom=False)
+
     # Shared x-axis ticks on the lowest visible panel
-    ax_bottom = ax_waste if ax_waste is not None else ax_usage
+    ax_bottom = ax_storage if ax_storage is not None else (ax_waste if ax_waste is not None else ax_usage)
     tick_s = _nice_tick_seconds(t_span)
     ticks  = np.arange(0, t_span + tick_s, tick_s)
     ax_bottom.set_xticks(ticks * t_scale)

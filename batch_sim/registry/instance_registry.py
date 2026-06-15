@@ -2,9 +2,20 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import yaml
 from batch_sim.core.schemas import InstanceTypeConfig, InstanceRegistryConfig
+
+if TYPE_CHECKING:
+    from batch_sim.generator.job_spec import JobSpec
+
+# BSIM-91: EBS gp3 price (us-east-1 on-demand, $/GB/hr)
+EBS_GP3_PRICE_PER_GB_HOUR: float = 0.0001096
+
+
+def workspace_gb(job: "JobSpec") -> float:
+    """Return the thin-LV workspace size for a job based on its preprocess peak RAM."""
+    return job.profile.preprocess_peak_ram_gb
 
 
 class InstanceRegistry:
@@ -50,25 +61,23 @@ class K8SCapacityProfile:
 
 def compute_k8s_capacity(
     instance: InstanceTypeConfig,
-    centroid_peak_rams: list[float],
+    spike_max_gb: float,
     os_overhead_gb: float = 2.0,
+    centroid_peak_rams: "list[float] | None" = None,
 ) -> K8SCapacityProfile:
-    fitting = [r for r in centroid_peak_rams if r <= instance.ram_gb - os_overhead_gb]
-    if not fitting:
-        return K8SCapacityProfile(instance=instance, tier_local_mm_gb=0.0,
-            spike_headroom_gb=0.0, os_overhead_gb=os_overhead_gb,
-            effective_schedulable_gb=0.0, soft_limit_gb=0.0,
-            max_schedulable_jobs=0, headroom_pct=0.0)
-    mm = max(fitting)
-    spike = mm
-    effective = max(instance.ram_gb - os_overhead_gb - spike, 0.0)
-    soft = 0.08 * mm
-    max_jobs = int(effective // soft) if soft > 0 and effective > 0 else 0
-    return K8SCapacityProfile(instance=instance, tier_local_mm_gb=mm,
-        spike_headroom_gb=spike, os_overhead_gb=os_overhead_gb,
-        effective_schedulable_gb=effective, soft_limit_gb=soft,
-        max_schedulable_jobs=max_jobs,
-        headroom_pct=(spike / instance.ram_gb) * 100.0)
+    """Compute K8S node capacity from the queue's declared spike reservation.
+
+    spike_max_gb is the non-schedulable semaphore region declared on the
+    QueueDefinition — a hardware constant independent of queued jobs.
+    centroid_peak_rams is ignored; retained as a keyword arg so any remaining
+    legacy call sites don't immediately fail.  Remove after BSIM-100 rollout.
+    """
+    effective = max(instance.ram_gb - os_overhead_gb - spike_max_gb, 0.0)
+    return K8SCapacityProfile(instance=instance, tier_local_mm_gb=spike_max_gb,
+        spike_headroom_gb=spike_max_gb, os_overhead_gb=os_overhead_gb,
+        effective_schedulable_gb=effective, soft_limit_gb=0.0,
+        max_schedulable_jobs=0,
+        headroom_pct=(spike_max_gb / instance.ram_gb * 100.0) if instance.ram_gb > 0 else 0.0)
 
 
 def batch_max_jobs(instance: InstanceTypeConfig, peak_ram_gb: float, declared_vcpu: int) -> int:

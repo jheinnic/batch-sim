@@ -3,9 +3,12 @@ from __future__ import annotations
 import json, statistics
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from batch_sim.metrics.collector import MetricsCollector, EventType
 from batch_sim.registry.instance_registry import NodeCostAccruer, PoolCostSummary
+
+if TYPE_CHECKING:
+    from batch_sim.scheduler.storage_pool import NodeStoragePool, GenerationalStoragePool
 
 
 def _stats(values):
@@ -97,6 +100,62 @@ def compute_idle_decomposition(collector):
 
 
 @dataclass
+class StorageMetrics:
+    """BSIM-94: Aggregated storage cost and usage metrics for one scheduler run."""
+    compute_cost_usd: float = 0.0
+    storage_cost_usd: float = 0.0
+    total_cost_usd: float = 0.0
+    storage_pct: float = 0.0
+    expansion_events: int = 0
+    stranded_storage_gb_hours: float = 0.0
+    released_capacity_gb_hours: float = 0.0   # K8S generational only
+    nodes_exhausted: int = 0
+
+
+def compute_storage_metrics(
+    compute_cost_usd: float,
+    collector: MetricsCollector,
+    storage_pools: list,
+) -> StorageMetrics:
+    """Build StorageMetrics from event log and pool state after simulation."""
+    storage_cost = sum(p.storage_cost_usd for p in storage_pools)
+    total = compute_cost_usd + storage_cost
+    pct = (storage_cost / total * 100.0) if total > 0 else 0.0
+
+    expansion_events = len(collector.events_of_type(EventType.STORAGE_POOL_EXPANDED))
+    nodes_exhausted = len(set(
+        e.data["node_id"] for e in collector.events_of_type(EventType.STORAGE_EXHAUSTED)
+    ))
+
+    # Stranded capacity = integral of (capacity - committed) over node lifetime
+    # Approximated from the pool objects' final state; for full accuracy use events.
+    stranded = 0.0
+    released = 0.0
+    for p in storage_pools:
+        from batch_sim.scheduler.storage_pool import GenerationalStoragePool
+        if isinstance(p, GenerationalStoragePool):
+            for gen in p._generations:
+                if gen.close_time >= 0:
+                    duration_h = (gen.close_time - gen.open_time) / 3600.0
+                    released += gen.capacity_gb * duration_h
+        else:
+            if p._close_time >= 0:
+                duration_h = (p._close_time - p.open_time) / 3600.0
+                stranded += (p.pool_capacity_gb - p.pool_committed_gb) * duration_h
+
+    return StorageMetrics(
+        compute_cost_usd=round(compute_cost_usd, 6),
+        storage_cost_usd=round(storage_cost, 6),
+        total_cost_usd=round(total, 6),
+        storage_pct=round(pct, 2),
+        expansion_events=expansion_events,
+        stranded_storage_gb_hours=round(stranded, 4),
+        released_capacity_gb_hours=round(released, 4),
+        nodes_exhausted=nodes_exhausted,
+    )
+
+
+@dataclass
 class Scorecard:
     scheduler_type: str
     panic_threshold_s: float
@@ -105,6 +164,7 @@ class Scorecard:
     cost_summary: PoolCostSummary
     idle_decomposition: IdleTimeDecomposition
     k8s_capacity_report: Optional[dict] = None
+    storage_metrics: Optional[StorageMetrics] = None
 
     def save(self, path):
         path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,19 +177,25 @@ class Scorecard:
                 "cost_over_time": self.cost_summary.cost_over_time,
                 "node_count_over_time": self.cost_summary.node_count_over_time},
             "idle_decomposition": asdict(self.idle_decomposition),
-            "k8s_capacity_report": self.k8s_capacity_report}
+            "k8s_capacity_report": self.k8s_capacity_report,
+            "storage_metrics": asdict(self.storage_metrics) if self.storage_metrics else None}
         with open(path, "w") as f: json.dump(payload, f, indent=2)
 
 
 def build_scorecard(scheduler_type, panic_threshold_s, event_list_path,
                     collector, accruers, sla_target_seconds, sim_horizon,
-                    k8s_capacity_report=None):
+                    k8s_capacity_report=None, storage_pools=None):
+    pool_summary = PoolCostSummary.from_accruers(accruers, sim_horizon=sim_horizon)
+    sm = None
+    if storage_pools is not None:
+        sm = compute_storage_metrics(pool_summary.total_cost_usd, collector, storage_pools)
     return Scorecard(scheduler_type=scheduler_type, panic_threshold_s=panic_threshold_s,
         event_list_path=event_list_path,
         job_stats=compute_job_stats(collector, sla_target_seconds),
-        cost_summary=PoolCostSummary.from_accruers(accruers, sim_horizon=sim_horizon),
+        cost_summary=pool_summary,
         idle_decomposition=compute_idle_decomposition(collector),
-        k8s_capacity_report=k8s_capacity_report)
+        k8s_capacity_report=k8s_capacity_report,
+        storage_metrics=sm)
 
 
 def compare_scorecards(batch_path, k8s_path):
@@ -140,7 +206,7 @@ def compare_scorecards(batch_path, k8s_path):
         if bv is None or kv is None: return None
         return {"batch": bv, "k8s": kv, "delta": kv - bv,
                 "ratio_k8s_batch": kv / bv if bv != 0 else None}
-    return {
+    result = {
         "total_cost_usd": delta(batch["cost_summary"], k8s["cost_summary"], "total_cost_usd"),
         "pool_job_count": delta(batch["job_stats"], k8s["job_stats"], "pool_job_count"),
         "pool_sla_breach_count": delta(batch["job_stats"], k8s["job_stats"], "pool_sla_breach_count"),
@@ -150,3 +216,19 @@ def compare_scorecards(batch_path, k8s_path):
                              "k8s": (k8s["job_stats"]["pool_queue_wait_s"] or {}).get("mean")},
         "idle_total_s": delta(batch["idle_decomposition"], k8s["idle_decomposition"], "total_idle_s"),
     }
+    # BSIM-94: storage cost breakdown when both scorecards have storage_metrics
+    bs = batch.get("storage_metrics"); ks = k8s.get("storage_metrics")
+    if bs and ks:
+        result["compute_cost_usd"] = delta(bs, ks, "compute_cost_usd")
+        result["storage_cost_usd"] = delta(bs, ks, "storage_cost_usd")
+        result["total_cost_with_storage_usd"] = delta(bs, ks, "total_cost_usd")
+        # Summary finding: does K8S storage overhead erode the compute saving?
+        compute_delta = (ks.get("compute_cost_usd") or 0) - (bs.get("compute_cost_usd") or 0)
+        storage_delta = (ks.get("storage_cost_usd") or 0) - (bs.get("storage_cost_usd") or 0)
+        if compute_delta < 0 and storage_delta > 0:
+            erosion_pct = abs(storage_delta / compute_delta) * 100.0 if compute_delta != 0 else 0.0
+            result["storage_erodes_compute_saving"] = {
+                "erodes": erosion_pct > 100.0,
+                "erosion_pct": round(erosion_pct, 1),
+            }
+    return result

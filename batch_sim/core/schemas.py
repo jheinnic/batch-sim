@@ -1,5 +1,6 @@
 """BSIM-2: Pydantic configuration schemas for all simulation inputs."""
 from __future__ import annotations
+import warnings
 from enum import Enum
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -9,9 +10,22 @@ NonNegativeFloat = Annotated[float, Field(ge=0)]
 PositiveInt = Annotated[int, Field(gt=0)]
 Fraction = Annotated[float, Field(ge=0.0, le=1.0)]
 
+# BSIM-104: delimiter separating tier names within a single compatible_tiers string.
+TIER_SET_DELIMITER = ";"
+
+
+def parse_tier_set(s: str) -> list[str]:
+    """BSIM-104: Split a semicolon-delimited compatibility string into tier names.
+
+    A single tier name (no delimiter) yields a one-element list. Whitespace
+    around each name is trimmed; empty segments are dropped.
+    """
+    return [t.strip() for t in s.split(TIER_SET_DELIMITER) if t.strip()]
+
 
 class TimeWindowOverride(BaseModel):
-    """BSIM-77: Per-centroid time-window override for arrival rate and bin weights."""
+    """BSIM-77 / BSIM-100: Per-centroid time-window override for arrival rate, bin weights,
+    and queue routing."""
     start_time_s: NonNegativeFloat
     end_time_s: PositiveFloat
     burst_rate: PositiveFloat | None = Field(
@@ -25,6 +39,24 @@ class TimeWindowOverride(BaseModel):
                     "Must have the same length as the centroid's centroid_bin_weights. "
                     "Absent = inherit centroid baseline weights.",
     )
+    compatible_tiers: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "BSIM-104: Override tier compatibility for this centroid during this window. "
+            "A single string sets the compatibility set for all bins; semicolons "
+            "separate multiple tier names within the string (e.g. 'small;medium'). "
+            "A list sets it per-bin: element[bin_idx], each itself a (possibly "
+            "semicolon-delimited) compatibility set. List length must equal "
+            "centroid_bin_weights length. Absent = inherit centroid default."
+        ),
+    )
+    queue_name: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "DEPRECATED (BSIM-104): use compatible_tiers. A single-queue value is "
+            "promoted to a single-element compatibility set at load time."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_window(self) -> "TimeWindowOverride":
@@ -33,6 +65,15 @@ class TimeWindowOverride(BaseModel):
                 f"end_time_s ({self.end_time_s}) must be > "
                 f"start_time_s ({self.start_time_s})"
             )
+        # BSIM-104: promote deprecated queue_name → compatible_tiers
+        if self.queue_name is not None:
+            warnings.warn(
+                "TimeWindowOverride.queue_name is deprecated (BSIM-104); "
+                "use compatible_tiers instead.",
+                DeprecationWarning, stacklevel=2,
+            )
+            if self.compatible_tiers is None:
+                self.compatible_tiers = self.queue_name
         return self
 
 
@@ -150,6 +191,28 @@ class CentroidConfig(BaseModel):
                     "1.0 = nominal duration; 2.0 = twice as long.",
     )
 
+    # BSIM-104: tier compatibility binding
+    compatible_tiers: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "BSIM-104: Tier profiles this centroid's jobs may run on. "
+            "A single string sets the compatibility set for all bins; semicolons "
+            "separate multiple tier names within the string (e.g. 'small;medium'). "
+            "A list sets it per-bin: element[bin_idx], each itself a (possibly "
+            "semicolon-delimited) compatibility set. List length must equal "
+            "len(centroid_bin_weights). Absent = no constraint (legacy / no-tier mode "
+            "or burst-derived inference when the scheduler has tiers configured)."
+        ),
+    )
+    # BSIM-100: deprecated single-queue binding (promoted to compatible_tiers)
+    queue_name: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "DEPRECATED (BSIM-104): use compatible_tiers. A single-queue value is "
+            "promoted to a single-element compatibility set at load time."
+        ),
+    )
+
     # BSIM-77: time-window overrides (optional)
     time_windows: list[TimeWindowOverride] | None = Field(
         default=None,
@@ -241,6 +304,25 @@ class CentroidConfig(BaseModel):
                                 f"require 0 < lo < hi"
                             )
 
+        # BSIM-104: promote deprecated queue_name → compatible_tiers
+        if self.queue_name is not None:
+            warnings.warn(
+                "CentroidConfig.queue_name is deprecated (BSIM-104); "
+                "use compatible_tiers instead.",
+                DeprecationWarning, stacklevel=2,
+            )
+            if self.compatible_tiers is None:
+                self.compatible_tiers = self.queue_name
+
+        # BSIM-104: per-bin compatible_tiers list length check
+        if isinstance(self.compatible_tiers, list):
+            n_bins = len(self.centroid_bin_weights) if self.centroid_bin_weights else 0
+            if len(self.compatible_tiers) != n_bins:
+                raise ValueError(
+                    f"compatible_tiers list has {len(self.compatible_tiers)} entries but "
+                    f"centroid_bin_weights has {n_bins}"
+                )
+
         # BSIM-77: time-window validation
         if self.time_windows:
             n_bins = len(self.centroid_bin_weights) if self.centroid_bin_weights else None
@@ -263,6 +345,18 @@ class CentroidConfig(BaseModel):
                             f"time_window [{w.start_time_s}, {w.end_time_s}) "
                             f"centroid_bin_weights has {len(w.centroid_bin_weights)} "
                             f"entries but centroid has {n_bins}"
+                        )
+                if isinstance(w.compatible_tiers, list):
+                    if n_bins is None:
+                        raise ValueError(
+                            f"time_window [{w.start_time_s}, {w.end_time_s}) "
+                            "compatible_tiers list requires centroid_bin_weights to be set"
+                        )
+                    if len(w.compatible_tiers) != n_bins:
+                        raise ValueError(
+                            f"time_window [{w.start_time_s}, {w.end_time_s}) "
+                            f"compatible_tiers list has {len(w.compatible_tiers)} entries "
+                            f"but centroid has {n_bins} bins"
                         )
 
         return self
@@ -304,6 +398,7 @@ class InstanceTypeConfig(BaseModel):
     ram_gb: PositiveFloat
     vcpu: PositiveInt
     hourly_price_usd: PositiveFloat
+    max_ebs_volumes: PositiveInt = 28
 
 
 class InstanceRegistryConfig(BaseModel):
@@ -324,7 +419,7 @@ class SchedulerType(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# BSIM-83: Time-based scheduling policy schema
+# BSIM-83 / BSIM-100: Time-based scheduling policy schema
 # ---------------------------------------------------------------------------
 
 class DrainRule(BaseModel):
@@ -336,14 +431,85 @@ class DrainRule(BaseModel):
     duration_s: PositiveFloat
 
 
+class TierProfile(BaseModel):
+    """BSIM-104: Global, static definition of a node-tier profile (node pool).
+
+    A tier binds an instance type to a fixed split of its RAM between the
+    bin-packing zone and the preprocess-spike semaphore zone.  Multiple tiers
+    may share a spawn_instance_class, differing only in spike_max_gb — this is
+    what lets the joint provisioner (BSIM-107) trade bin-packing headroom for
+    burst headroom on the same hardware.
+
+    Hardware constants — they do not vary across time windows.  Every node
+    launched for this tier carries these properties for its full lifetime.
+
+    Renamed from QueueDefinition (BSIM-100); QueueDefinition remains as an alias.
+    """
+    name: str = Field(..., description="Unique tier identifier referenced by centroid compatible_tiers.")
+    spike_max_gb: NonNegativeFloat = Field(
+        ...,
+        description=(
+            "Non-schedulable semaphore region reserved on every node in this tier (GB). "
+            "effective_schedulable_gb = instance.ram_gb - os_overhead_gb - spike_max_gb. "
+            "A job is burst-compatible with this tier when "
+            "(preprocess_peak - soft_limit) <= spike_max_gb. "
+            "BSIM-113: 0 declares a no-boost tier — the whole node (minus OS overhead) "
+            "is schedulable, suitable for flat jobs whose preprocess_peak <= soft_limit."
+        ),
+    )
+    spawn_instance_class: str = Field(
+        ..., description="Instance type name (from registry) launched for this tier."
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _no_delimiter_in_name(cls, v: str) -> str:
+        if TIER_SET_DELIMITER in v:
+            raise ValueError(
+                f"tier name {v!r} must not contain the compatibility-set "
+                f"delimiter {TIER_SET_DELIMITER!r}"
+            )
+        return v
+
+
+# BSIM-104: backward-compatible alias for the renamed model.
+QueueDefinition = TierProfile
+
+
 class QueuePolicy(BaseModel):
+    """Per-window behavioral configuration for a queue.
+
+    BSIM-100 (new format): set ``name`` to reference a global QueueDefinition.
+    The hardware constants (spike_max_gb, spawn_instance_class) live on the
+    QueueDefinition; only spawn rate, node cap, and drain rules vary per window.
+
+    Legacy format (deprecated): set ``exclusive_min_gb`` / ``inclusive_max_gb`` /
+    ``spawn_instance_class`` directly.  Accepted when no global ``queues:`` registry
+    is declared on the SchedulerConfig.  Will be removed in a future epic.
     """
-    A memory-band queue: handles jobs whose preprocess_peak_ram_gb falls
-    in (exclusive_min_gb, inclusive_max_gb].
-    """
-    exclusive_min_gb: NonNegativeFloat = Field(default=0.0)
-    inclusive_max_gb: PositiveFloat
-    spawn_instance_class: str
+    # ── New format (BSIM-100) ────────────────────────────────────────────────
+    name: str | None = Field(
+        default=None,
+        description="Named queue reference (BSIM-100). Must match a QueueDefinition.name.",
+    )
+    max_nodes: PositiveInt | None = Field(
+        default=None,
+        description="Maximum nodes active for this queue during this window. None = unlimited.",
+    )
+    # ── Legacy format (deprecated) ───────────────────────────────────────────
+    exclusive_min_gb: NonNegativeFloat | None = Field(
+        default=None,
+        description="Deprecated (BSIM-100). Lower bound of the RAM band for implicit routing.",
+    )
+    inclusive_max_gb: PositiveFloat | None = Field(
+        default=None,
+        description="Deprecated (BSIM-100). Upper bound of the RAM band for implicit routing.",
+    )
+    spawn_instance_class: str | None = Field(
+        default=None,
+        description="Deprecated (BSIM-100). Moved to QueueDefinition.spawn_instance_class.",
+    )
+    # ── Shared ───────────────────────────────────────────────────────────────
     spawn_rate_per_min: PositiveFloat = Field(
         default=1.0,
         description="Maximum node launches per minute for this queue.",
@@ -352,10 +518,17 @@ class QueuePolicy(BaseModel):
 
     @model_validator(mode="after")
     def _validate_queue(self) -> "QueuePolicy":
-        if self.inclusive_max_gb <= self.exclusive_min_gb:
+        is_new = self.name is not None
+        is_legacy = self.inclusive_max_gb is not None
+        if not is_new and not is_legacy:
+            raise ValueError(
+                "QueuePolicy must have either 'name' (new format, BSIM-100) "
+                "or 'inclusive_max_gb' (legacy format)"
+            )
+        if is_legacy and self.inclusive_max_gb <= (self.exclusive_min_gb or 0.0):
             raise ValueError(
                 f"inclusive_max_gb ({self.inclusive_max_gb}) must be > "
-                f"exclusive_min_gb ({self.exclusive_min_gb})"
+                f"exclusive_min_gb ({self.exclusive_min_gb or 0.0})"
             )
         if len(self.drain_rules) >= 2:
             sorted_rules = sorted(self.drain_rules, key=lambda r: r.idle_vcpu)
@@ -370,11 +543,18 @@ class QueuePolicy(BaseModel):
                     )
         return self
 
+    @property
+    def is_named(self) -> bool:
+        """True when using the new BSIM-100 named-queue format."""
+        return self.name is not None
+
 
 class TimeWindowPolicy(BaseModel):
-    """
-    A time window within a 24-hour day [start_time_s, end_time_s) that
-    defines one or more memory-band queues.
+    """A time window within a 24-hour day [start_time_s, end_time_s).
+
+    Lists the queues active during this window and their behavioural config.
+    When using the named-queue format (BSIM-100), each entry references a
+    global QueueDefinition by name.  Queues not listed in a window are dormant.
     """
     start_time_s: NonNegativeFloat
     end_time_s: PositiveFloat
@@ -387,22 +567,25 @@ class TimeWindowPolicy(BaseModel):
                 f"end_time_s ({self.end_time_s}) must be > "
                 f"start_time_s ({self.start_time_s})"
             )
-        queues_sorted = sorted(self.queues, key=lambda q: q.exclusive_min_gb)
-        if queues_sorted[0].exclusive_min_gb != 0.0:
-            raise ValueError(
-                f"First queue band in window [{self.start_time_s}, {self.end_time_s}) "
-                f"must start at exclusive_min_gb=0; "
-                f"got {queues_sorted[0].exclusive_min_gb}"
-            )
-        for i in range(len(queues_sorted) - 1):
-            lo, hi = queues_sorted[i], queues_sorted[i + 1]
-            if lo.inclusive_max_gb != hi.exclusive_min_gb:
+        # Legacy format only: validate contiguous RAM-band coverage.
+        legacy = [q for q in self.queues if not q.is_named]
+        if legacy:
+            legacy_sorted = sorted(legacy, key=lambda q: q.exclusive_min_gb or 0.0)
+            if (legacy_sorted[0].exclusive_min_gb or 0.0) != 0.0:
                 raise ValueError(
-                    f"Queue band gap/overlap in window [{self.start_time_s}, {self.end_time_s}): "
-                    f"band ({lo.exclusive_min_gb}, {lo.inclusive_max_gb}] "
-                    f"is not contiguous with "
-                    f"band ({hi.exclusive_min_gb}, {hi.inclusive_max_gb}]"
+                    f"First legacy queue band in window [{self.start_time_s}, {self.end_time_s}) "
+                    f"must start at exclusive_min_gb=0; "
+                    f"got {legacy_sorted[0].exclusive_min_gb}"
                 )
+            for i in range(len(legacy_sorted) - 1):
+                lo, hi = legacy_sorted[i], legacy_sorted[i + 1]
+                if lo.inclusive_max_gb != (hi.exclusive_min_gb or 0.0):
+                    raise ValueError(
+                        f"Queue band gap/overlap in window [{self.start_time_s}, {self.end_time_s}): "
+                        f"band ({lo.exclusive_min_gb}, {lo.inclusive_max_gb}] "
+                        f"is not contiguous with "
+                        f"band ({hi.exclusive_min_gb}, {hi.inclusive_max_gb}]"
+                    )
         return self
 
 
@@ -466,6 +649,34 @@ class KarpenterProvisioner(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# BSIM-91: EBS thin-pool storage cost config
+# ---------------------------------------------------------------------------
+
+class StoragePoolConfig(BaseModel):
+    """Per-node EBS thin-pool storage configuration shared by Batch and K8S."""
+    initial_volume_count: PositiveInt = Field(
+        default=2,
+        description="Number of EBS volumes attached at node launch.",
+    )
+    volume_size_gb: PositiveFloat = Field(
+        default=1000.0,
+        description="Physical size of each EBS volume in GB.",
+    )
+    logical_capacity_gb: PositiveFloat = Field(
+        default=65536.0,
+        description="LVM thin-pool overcommit ceiling (default 64 TB).",
+    )
+    expansion_trigger_pct: Fraction = Field(
+        default=0.80,
+        description="Expand physical pool when committed > this fraction × capacity.",
+    )
+    ebs_price_per_gb_hour: PositiveFloat = Field(
+        default=0.0001096,
+        description="EBS gp3 cost in USD per GB per hour (us-east-1 on-demand).",
+    )
+
+
 class SchedulerConfig(BaseModel):
     scheduler_type: SchedulerType
     panic_threshold_seconds: PositiveFloat = 300.0
@@ -507,9 +718,45 @@ class SchedulerConfig(BaseModel):
             "Also serves as the cool_down period after each node launch."
         ),
     )
+    storage: StoragePoolConfig | None = Field(
+        default=None,
+        description=(
+            "BSIM-91: EBS thin-pool storage cost model. "
+            "When absent, storage costs are not tracked."
+        ),
+    )
+    tiers: list[TierProfile] = Field(
+        default_factory=list,
+        description=(
+            "BSIM-104: Global tier-profile registry. "
+            "When non-empty, enables tier-compatibility routing: centroids declare "
+            "the tiers their jobs may run on via compatible_tiers; each node pool is "
+            "sized by the tier's spike_max_gb rather than derived from job-spec data. "
+            "Multiple tiers may share a spawn_instance_class. "
+            "When empty, the scheduler falls back to legacy RAM-band routing."
+        ),
+    )
+    queues: list[TierProfile] = Field(
+        default_factory=list,
+        description=(
+            "DEPRECATED (BSIM-104): use tiers. Kept in sync with tiers at load time "
+            "so existing configs and not-yet-migrated readers continue to work."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_time_window_policy(self) -> "SchedulerConfig":
+        # BSIM-104: keep deprecated `queues` and canonical `tiers` in sync so both
+        # existing configs (queues) and not-yet-migrated readers (cfg.queues) work.
+        if self.queues and not self.tiers:
+            warnings.warn(
+                "SchedulerConfig.queues is deprecated (BSIM-104); use tiers instead.",
+                DeprecationWarning, stacklevel=2,
+            )
+            self.tiers = self.queues
+        elif self.tiers and not self.queues:
+            self.queues = self.tiers
+
         if not self.time_window_policy:
             return self
         windows = sorted(self.time_window_policy, key=lambda w: w.start_time_s)
@@ -531,6 +778,17 @@ class SchedulerConfig(BaseModel):
                     f"window ending at {lo.end_time_s}s is not contiguous with "
                     f"window starting at {hi.start_time_s}s"
                 )
+        # BSIM-104: validate named tier references against the global registry.
+        if self.tiers:
+            defined = {t.name for t in self.tiers}
+            for w in self.time_window_policy:
+                for qp in w.queues:
+                    if qp.is_named and qp.name not in defined:
+                        raise ValueError(
+                            f"Tier '{qp.name}' in window [{w.start_time_s}, {w.end_time_s}) "
+                            f"is not declared in the global 'tiers' registry. "
+                            f"Declared tiers: {sorted(defined)}"
+                        )
         return self
 
 
