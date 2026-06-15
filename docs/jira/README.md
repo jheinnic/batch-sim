@@ -18,6 +18,9 @@
 | BSIM-E16 | Time-Based Scheduling Policy | BSIM-83 – BSIM-85 |
 | BSIM-E17 | K8S+ Multi-Pool Redesign | BSIM-86 – BSIM-90 |
 | BSIM-E18 | Storage Provisioning Cost Model | BSIM-91 – BSIM-94 |
+| BSIM-E19 | K8S Queue Fidelity | BSIM-100 – BSIM-103 |
+| BSIM-E20 | Multi-Tier Boost Provisioning | BSIM-104 – BSIM-108, BSIM-113 |
+| BSIM-E21 | Scheduler Config Composition | BSIM-109 – BSIM-112 |
 
 ## Files
 
@@ -35,3 +38,6 @@
 - [BSIM-E16: Time-Based Scheduling Policy](epic_E16_time_based_scheduling_policy.md)
 - [BSIM-E17: K8S+ Multi-Pool Redesign](epic_E17_k8s_plus_multipool_redesign.md)
 - [BSIM-E18: Storage Provisioning Cost Model](epic_E18_storage_cost_model.md)
+- [BSIM-E19: K8S Queue Fidelity](epic_E19_k8s_queue_fidelity.md)
+- [BSIM-E20: Multi-Tier Boost Provisioning](epic_E20_multi_tier_boost_provisioning.md)
+- [BSIM-E21: Scheduler Config Composition](epic_E21_scheduler_config_composition.md)

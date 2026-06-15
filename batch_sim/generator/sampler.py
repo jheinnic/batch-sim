@@ -2,7 +2,7 @@
 from __future__ import annotations
 import numpy as np
 from numpy.random import Generator
-from batch_sim.core.schemas import CentroidConfig
+from batch_sim.core.schemas import CentroidConfig, parse_tier_set
 from batch_sim.generator.job_spec import JobSpec, build_phase_profile
 
 
@@ -96,8 +96,12 @@ def _sample_job_bin_mode(
                 else profile.workhorse_declared_vcpu)
     hard_cpu = max(hard_vcpu)
 
+    ct = centroid.compatible_tiers
+    raw = ct[bin_idx] if isinstance(ct, list) else ct
+    resolved_tiers = parse_tier_set(raw) if raw else []
     return JobSpec(centroid_id=centroid.id, profile=profile,
-                   soft_cpu=soft_cpu, hard_cpu=hard_cpu)
+                   soft_cpu=soft_cpu, hard_cpu=hard_cpu,
+                   compatible_tiers=resolved_tiers, bin_idx=bin_idx)
 
 
 def sample_job(
@@ -168,5 +172,8 @@ def sample_job(
     else:
         hard_cpu = soft_cpu   # no burst: Batch behaviour
 
+    ct = centroid.compatible_tiers
+    resolved_tiers = parse_tier_set(ct) if isinstance(ct, str) else []
     return JobSpec(centroid_id=centroid.id, profile=profile,
-                   soft_cpu=soft_cpu, hard_cpu=hard_cpu)
+                   soft_cpu=soft_cpu, hard_cpu=hard_cpu,
+                   compatible_tiers=resolved_tiers)

@@ -7,7 +7,8 @@ from batch_sim.core.engine import NodeModel, JobQueue, Priority, QueueEntry, Ove
 from batch_sim.core.schemas import SchedulerConfig
 from batch_sim.generator.job_spec import JobSpec
 from batch_sim.metrics.collector import MetricsCollector, NodeState as NodeStateEnum
-from batch_sim.registry.instance_registry import InstanceRegistry, NodeCostAccruer
+from batch_sim.registry.instance_registry import InstanceRegistry, NodeCostAccruer, workspace_gb
+from batch_sim.scheduler.storage_pool import NodeStoragePool
 
 
 class BatchScheduler:
@@ -15,6 +16,7 @@ class BatchScheduler:
         self.cfg = cfg; self.registry = registry; self.metrics = metrics
         self.rng = rng or random.Random(42); self.os_overhead_gb = os_overhead_gb
         self._queue = JobQueue(); self._nodes = {}; self._accruers = {}
+        self._storage_pools: dict[str, NodeStoragePool] = {}
         self._reserved = {}; self._overload_handler = None; self._panic_monitors = {}
 
     def _setup(self, env):
@@ -37,6 +39,9 @@ class BatchScheduler:
         node.allocated_ram_gb = max(0.0, node.allocated_ram_gb - p.peak_ram_gb)
         node.allocated_vcpu = max(0.0, node.allocated_vcpu - (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
+        pool = self._storage_pools.get(node.node_id)
+        if pool is not None:
+            pool.job_exit(workspace_gb(job))
         if node.job_count == 0:
             node.state = NodeStateEnum.IDLE; node.idle_since = env.now
             self.metrics.node_idle(env.now, node.node_id)
@@ -160,6 +165,9 @@ class BatchScheduler:
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += _vcpu
         if best.state == NodeStateEnum.IDLE: best.state = NodeStateEnum.READY
+        pool = self._storage_pools.get(best.node_id)
+        if pool is not None:
+            pool.job_start(env.now, job.job_id, workspace_gb(job), self.metrics)
         env.process(run_job_process(env=env, job=job, node=best, metrics=self.metrics,
             overload_handler=self._overload_handler, arrival_time=entry.arrival_time,
             queue_entry_time=entry.enqueue_time, scheduler=self))
@@ -185,6 +193,10 @@ class BatchScheduler:
                          os_overhead_gb=self.os_overhead_gb)
         self._nodes[node_id] = node
         self._accruers[node_id] = NodeCostAccruer(node_id=node_id, instance=instance, launch_time=env.now)
+        if self.cfg.storage is not None:
+            self._storage_pools[node_id] = NodeStoragePool(
+                node_id=node_id, config=self.cfg.storage,
+                instance=instance, open_time=env.now)
         yield env.timeout(self.cfg.warmup_delay_seconds)
         node.state = NodeStateEnum.READY
         self.metrics.node_ready(env.now, node_id, instance.name)
@@ -206,6 +218,8 @@ class BatchScheduler:
             self.metrics.node_terminated(env.now, node.node_id, env.now - idle_start)
             accruer = self._accruers.get(node.node_id)
             if accruer: accruer.terminate(env.now)
+            pool = self._storage_pools.get(node.node_id)
+            if pool is not None: pool.close(env.now)
 
     def cpu_boost(self, env, node, metrics):
         from batch_sim.scheduler.cpu_boost_integration import run_cpu_boost_batch
@@ -213,6 +227,10 @@ class BatchScheduler:
 
     @property
     def accruers(self): return list(self._accruers.values())
+
+    @property
+    def storage_pools(self) -> list[NodeStoragePool]:
+        return list(self._storage_pools.values())
 
     def finalize(self, env):
         for node_id, accruer in self._accruers.items():
@@ -224,3 +242,5 @@ class BatchScheduler:
                 self.metrics.node_terminated(env.now, node_id, env.now - idle_since)
                 if node:
                     node.state = NodeStateEnum.TERMINATED
+        for pool in self._storage_pools.values():
+            pool.close(env.now)
