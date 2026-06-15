@@ -41,64 +41,31 @@ from batch_sim.registry.instance_registry import (
 )
 from batch_sim.core.schemas import InstanceTypeConfig
 from batch_sim.scheduler.storage_pool import GenerationalStoragePool
+from batch_sim.scheduler.burst_pool import NodeBurstPool
 
 
 # ---------------------------------------------------------------------------
-# Semaphore primitive
+# Phase-2 burst coordination (BSIM-122: GB-aware NodeBurstPool)
 # ---------------------------------------------------------------------------
 
-class NodeSemaphore:
-    """
-    SimPy-based counting semaphore for Phase-2 concurrency control.
-    acquire() is a generator that yields until a permit is available.
-    """
-
-    def __init__(self, env: simpy.Environment, permits: int) -> None:
-        self._env = env
-        self._permits = permits
-        self._available = permits
-        self._waiters: list[simpy.Event] = []
-
-    @property
-    def permits(self) -> int:
-        return self._permits
-
-    @property
-    def available(self) -> int:
-        return self._available
-
-    def acquire(self, job_id: str):
-        """Generator: yields until a permit is granted."""
-        if self._available > 0:
-            self._available -= 1
-            return
-        # Block until released.  release() uses transfer semantics: it does NOT
-        # increment _available when waking a waiter, so no decrement here either.
-        event = self._env.event()
-        self._waiters.append(event)
-        yield event
-
-    def release(self) -> None:
-        if self._waiters:
-            waiter = self._waiters.pop(0)
-            waiter.succeed()
-        else:
-            self._available = min(self._available + 1, self._permits)
-
-
 # ---------------------------------------------------------------------------
-# Semaphore-aware job process
+# Burst-pool-aware job process (BSIM-122)
 # ---------------------------------------------------------------------------
 
 def run_job_process_plus(
-    env, job, node, metrics, sem: NodeSemaphore,
+    env, job, node, metrics, burst_pool: NodeBurstPool,
     arrival_time, queue_entry_time, scheduler,
 ):
-    """Phase 2 is gated by the node semaphore — no crash possible."""
+    """BSIM-122: Phase 2 is gated by the node's GB-aware NodeBurstPool — multiple
+    jobs may boost concurrently as long as their combined burst fits the tier's
+    spike reservation; otherwise they serialise. No crash possible."""
     p = job.profile
     job_id = job.job_id
     start_time = env.now
     queue_wait_s = start_time - queue_entry_time
+    # Burst above the bin-packed soft limit; this is what draws on the spike
+    # reservation (matches BSIM-108 admission: burst = preprocess_peak - soft_limit).
+    burst_gb = max(0.0, p.preprocess_peak_ram_gb - p.soft_limit_ram_gb)
 
     metrics.job_start(env.now, job_id, job.centroid_id, node.node_id)
 
@@ -108,9 +75,10 @@ def run_job_process_plus(
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.download_duration_s)
 
-    # Phase 2: Pre-process — acquire semaphore first
+    # Phase 2: Pre-process — acquire burst headroom first (bounded by the
+    # reservation; never borrows bin-packing space)
     sem_wait_start = env.now
-    yield env.process(_acquire_sem(env, sem, job_id))
+    yield from burst_pool.acquire(burst_gb)
     sem_wait_s = env.now - sem_wait_start
 
     if sem_wait_s > 0.1:
@@ -124,7 +92,7 @@ def run_job_process_plus(
                       ram_gb=p.preprocess_peak_ram_gb, vcpu=p.preprocess_vcpu)
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.preprocess_duration_s)
-    sem.release()
+    burst_pool.release(burst_gb)
 
     # Phase 3: Workhorse — dynamic timing, same as run_job_process in engine.py
     node.update_phase(job_id, PhaseID.WORKHORSE, ram_gb=p.workhorse_ram_gb, vcpu=0.0)
@@ -175,11 +143,6 @@ def run_job_process_plus(
     scheduler.on_job_complete(env, node, job)
 
 
-def _acquire_sem(env, sem, job_id):
-    """Wrapper generator so SimPy can process the acquire."""
-    yield from sem.acquire(job_id)
-
-
 # ---------------------------------------------------------------------------
 # K8S+ Scheduler
 # ---------------------------------------------------------------------------
@@ -202,7 +165,7 @@ class K8SPlusScheduler:
 
         self._queue = JobQueue()
         self._nodes: dict[str, NodeModel] = {}
-        self._sems: dict[str, NodeSemaphore] = {}
+        self._burst_pools: dict[str, NodeBurstPool] = {}
         self._accruers: dict[str, NodeCostAccruer] = {}
         self._storage_pools: dict[str, GenerationalStoragePool] = {}
         self._reserved: dict[str, str] = {}
@@ -319,13 +282,6 @@ class K8SPlusScheduler:
                 os_overhead_gb=self.cfg.os_overhead_gb,
             )
         return self._capacity_cache[cache_key]
-
-    def _sem_permits(self, instance, queue_name: str = "") -> int:
-        cap = self._k8s_capacity(instance, queue_name)
-        if cap.spike_headroom_gb <= 0 or cap.effective_schedulable_gb <= 0:
-            return 1
-        slots = int(cap.spike_headroom_gb / cap.tier_local_mm_gb) if cap.tier_local_mm_gb > 0 else 1
-        return max(1, slots)
 
     # -----------------------------------------------------------------------
     # Legacy time-window helpers (kept for backward compat)
@@ -808,9 +764,9 @@ class K8SPlusScheduler:
         pool = self._storage_pools.get(best.node_id)
         if pool is not None:
             pool.job_start(env.now, job.job_id, workspace_gb(job), self.metrics)
-        sem = self._sems[best.node_id]
+        bp = self._burst_pools[best.node_id]
         env.process(run_job_process_plus(
-            env=env, job=job, node=best, metrics=self.metrics, sem=sem,
+            env=env, job=job, node=best, metrics=self.metrics, burst_pool=bp,
             arrival_time=entry.arrival_time, queue_entry_time=entry.enqueue_time,
             scheduler=self,
         ))
@@ -847,11 +803,15 @@ class K8SPlusScheduler:
             effective_tier = picked or ""
         effective_tier = effective_tier or ""
         cap = self._k8s_capacity(instance, effective_tier)
-        permits = self._sem_permits(instance, effective_tier)
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
                          os_overhead_gb=self.cfg.os_overhead_gb)
         self._nodes[node_id] = node
-        self._sems[node_id] = NodeSemaphore(env, permits)
+        # BSIM-122: GB-aware burst pool sized to this node's spike reservation
+        # (tier spike_max_gb in tier mode; derived spike headroom in legacy mode).
+        self._burst_pools[node_id] = NodeBurstPool(
+            env=env, node_physical_ram_gb=instance.ram_gb,
+            os_overhead_gb=self.cfg.os_overhead_gb,
+            headroom_gb=cap.spike_headroom_gb)
         if effective_tier:
             self._node_tier_name[node_id] = effective_tier
         self._capacity_cache[(instance.name, effective_tier)] = cap
@@ -1156,18 +1116,15 @@ class K8SPlusScheduler:
         result = {}
         for (instance_name, queue_name), cap in self._capacity_cache.items():
             report_key = f"{instance_name}|{queue_name}" if queue_name else instance_name
-            sem_permits = '?'
-            for a in self._accruers.values():
-                if a.instance.name == instance_name:
-                    sem_permits = self._sem_permits(a.instance, queue_name)
-                    break
             result[report_key] = {
                 'tier_local_mm_gb': cap.tier_local_mm_gb,
                 'effective_schedulable_gb': cap.effective_schedulable_gb,
                 'soft_limit_gb': cap.soft_limit_gb,
                 'max_schedulable_jobs': cap.max_schedulable_jobs,
                 'headroom_pct': round(cap.headroom_pct, 1),
-                'semaphore_permits': sem_permits,
+                # BSIM-122: burst concurrency is GB-bounded by the reservation,
+                # not a fixed permit count.
+                'burst_headroom_gb': round(cap.spike_headroom_gb, 2),
             }
         return result
 
