@@ -61,6 +61,10 @@ centroids:
     bin_steady_state_hard_limit_gb: [4, 8, 12]        # K8S RAM limit for workhorse phase
     bin_steady_state_actual_gb:     [[2, 4], [4, 8], [7, 11]]
     bin_workhorse_scale:            [0.8, 1.0, 1.25]  # small=half duration; large=2x nominal
+    compatible_tiers:
+    - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
 
     # CPU: 2 parallel stages with distinct I/O profiles.
     # E17 / BSIM-87: effective_vcpu is computed dynamically each stage by the
@@ -135,9 +139,12 @@ centroids:
     bin_preprocess_duration_s:      [40, 60]
     bin_preloader_hard_limit_gb:    [32, 46]
     bin_preloader_actual_gb:        [[20, 31], [30, 46]]
-    bin_steady_state_hard_limit_gb: [18, 24]
-    bin_steady_state_actual_gb:     [[10, 18], [18, 24]]
-    bin_workhorse_scale:            [1.0, 1.3]
+    bin_steady_state_hard_limit_gb: [20, 24]
+    bin_steady_state_actual_gb:     [[12, 20], [18, 24]]
+    bin_workhorse_scale:            [1.0, 0.3]
+    compatible_tiers:
+    - "1r14;2r14;2m14;4r14;4m14;4c14;2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
 
     # CPU: 2 parallel stages, mostly compute-bound (low io_wait)
     workhorse_cpu_stages:         [800, 60, 600, 40]
@@ -223,6 +230,7 @@ centroids:
     workhorse_soft_vcpu:          [1, 1, 1]   # K8S CPU request (scheduler packs by this)
     workhorse_hard_vcpu:          [8, 16, 8]   # burst ceiling = physical thread count per stage
     workhorse_io_wait_per_stage:  [0.05, 0.10, 0.03]
+    compatible_tiers:             "4r92;8r92;16r92;8r126;16r126;16m126;8r162;16r162;16m162"
 
     # E14 / BSIM-77: per-centroid time-window overrides.
     # Gaps outside these windows use the centroid baseline (4 bursts/hr, weights [5,3,2]).
@@ -291,9 +299,15 @@ centroids:
     bin_preprocess_duration_s:      [10, 10, 20, 40, 40]
     bin_preloader_hard_limit_gb:    [12, 24, 32, 32, 62]       # K8S RAM limit for preload phase
     bin_preloader_actual_gb:        [[6, 12], [14, 24], [22, 30], [24, 32], [48, 60]]  # uniform draw [lo, hi]
-    bin_steady_state_hard_limit_gb: [6, 10, 8, 10, 16]        # K8S RAM limit for workhorse phase
-    bin_steady_state_actual_gb:     [[3, 6], [6, 10], [4, 8], [6, 10], [8, 14]]
+    bin_steady_state_hard_limit_gb: [6, 12, 8, 10, 16]        # K8S RAM limit for workhorse phase
+    bin_steady_state_actual_gb:     [[3, 6], [8, 12], [4, 8], [6, 10], [8, 14]]
     bin_workhorse_scale:            [1.0, 1.0, 1.0, 1.0, 1.0]  # small=half duration; large=2x nominal
+    compatible_tiers:
+    - "1r8;2r8;2m8;4r8;4m8;4c8;1r14;2r14;2m14;4r14;4m14;4c14;2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "1r14;2r14;2m14;4r14;4m14;4c14;2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
+    - "4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
 
     # CPU: 2 parallel stages with distinct I/O profiles.
     # E17 / BSIM-87: effective_vcpu is computed dynamically each stage by the

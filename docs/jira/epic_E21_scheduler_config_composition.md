@@ -1,184 +1,231 @@
-# BSIM-E21 — Scheduler Config Composition
+# BSIM-E21 — Per-Scheduler Config Schemas
 
-Tidies `SchedulerConfig` so its *shape* reveals which fields each scheduler actually
-consumes, and removes one field that no scheduler reads at all.
+Splits the single, unified `SchedulerConfig` into a discriminated union of per-scheduler
+schemas — `BatchConfig` / `K8SConfig` / `K8SPlusConfig` over a shared
+`BaseSchedulerConfig` — so each scheduler's config carries *only* the fields it consumes,
+and the scheduler a config targets is intrinsic to the config rather than a separate
+argument.
 
 ## Problem
 
-`SchedulerConfig` is a flat bag of ~20 fields where K8S-family-only configuration sits
-at the same level as fields every scheduler reads. Nothing in the type tells a config
-author (or a new reader) that the Batch scheduler silently ignores, say,
-`k8s_os_overhead_gb` while honouring `scale_out_threshold_s`. The `provisioner`,
-`storage`, and `tiers` fields are already composed sub-models, so the codebase has
-started down the composition path unevenly; the loose K8S scalars never followed.
+Today one flat `SchedulerConfig` holds every field for every scheduler. Two consequences:
 
-A read-site audit (which scheduler actually references each field) produced this matrix:
+1. **Silent field bleed.** A Batch config can carry `k8s_os_overhead_gb`, `tiers`,
+   `provisioner` — all silently ignored. Nothing in the type tells an author what a given
+   scheduler honours. (Confirmed by a read-site audit — see the support matrix below.)
 
-| Field | Batch | K8S | K8S+ | Verdict |
+2. **Redundant, drift-prone scheduler argument.** The config already has a
+   `scheduler_type` field, but the CLI *also* requires `--scheduler`, and `simulate`
+   trusts the flag while ignoring the config:
+   ```python
+   cfg = load_scheduler_config(scheduler_config)          # cfg.scheduler_type exists…
+   run_one(..., scheduler_type=SchedulerType(scheduler))  # …but the --scheduler flag wins
+   ```
+   This is not hypothetical: a batch of runs labelled `so*-k8splus` were actually produced
+   by the plain K8S scheduler because `--scheduler k8s` overrode a `k8splus` config, and
+   the mislabel went unnoticed until crash counts were eyeballed.
+
+**Prior art.** BSIM-E17 already implemented exactly this separation — a standalone
+`K8SPlusSchedulerConfig` (with `pools`, `daemonset_headroom_gb`, `age_cordon_s`) distinct
+from the Batch/K8S configs. That work was merged to `origin/main` but bypassed when later
+development branched from a pre-E17 base and collapsed back to the unified config. This
+epic reclaims that boundary, generalised to all three schedulers, and the E17 schemas on
+`origin/main` are a reference.
+
+### Support matrix (the field-assignment spec)
+
+| Field | Batch | K8S | K8S+ | Home |
 |---|:---:|:---:|:---:|---|
-| `scheduler_type`, `panic_threshold_seconds`, `sla_target_seconds`, `warmup_delay_seconds`, `max_retries`, `replay_delay_seconds` | ✓ | ✓ | ✓ | cross-cutting |
-| `idle_timeout_seconds` | ✓ | ✓ | ✓ | cross-cutting |
-| `scale_out_threshold_s`, `scale_out_poll_s` | ✓ | ✓ | ✓ | cross-cutting (Batch has its own scale-out monitor) |
-| `storage` | ✓ | ✓ | ✓ | cross-cutting (already a sub-model) |
-| `k8s_os_overhead_gb` | — | ✓ | ✓ | K8S-family |
-| `time_window_policy` | — | ✓ | ✓ | K8S-family |
-| `tiers` / `queues` | — | ✓ | ✓ | K8S-family (already sub-models) |
-| `provisioner` | — | — | ✓ | K8S+-only |
-| `idle_check_interval_seconds` | — | — | — | **dead — no scheduler reads it** |
-
-Two findings shaped this epic:
-
-1. **The refactor is small.** Storage, scale-out, and idle-timeout turn out to be
-   genuinely shared (Batch has its own scale-out monitor and storage pools), and
-   `provisioner` / `storage` / `tiers` are already composed sub-models. The only
-   genuinely-K8S-only loose scalar is `k8s_os_overhead_gb`; `time_window_policy` is the
-   only other K8S-family field still sitting flat at top level.
-2. **One field is dead.** `idle_check_interval_seconds` is declared and set in configs
-   and fixtures but read by no scheduler.
+| `scheduler_type` (discriminator), `panic_threshold_seconds`, `sla_target_seconds`, `warmup_delay_seconds`, `max_retries`, `replay_delay_seconds`, `idle_timeout_seconds`, `scale_out_threshold_s`, `scale_out_poll_s`, `storage` | ✓ | ✓ | ✓ | `BaseSchedulerConfig` |
+| `allowed_instance_types` | ✓ | — | — | `BatchConfig` |
+| `k8s_os_overhead_gb`, `time_window_policy`, `tiers` | — | ✓ | ✓ | `K8SConfig` |
+| `provisioner` | — | — | ✓ | `K8SPlusConfig` |
+| `idle_check_interval_seconds` | — | — | — | **dead — removed (BSIM-110)** |
 
 ## Solution
 
-Group the two loose K8S-family fields under a `k8s: K8SConfig` sub-model
-(`k8s.os_overhead_gb`, `k8s.time_window_policy`). Leave the already-typed sub-models
-(`tiers`, `provisioner`, `storage`) and all cross-cutting fields at the top level —
-this is a light grouping of orphaned scalars, not a wholesale restructure. Migrate all
-affected config files and test fixtures directly to the nested shape; no flat→nested
-backward-compat shim (the flat keys become unknown fields). Delete the dead
-`idle_check_interval_seconds`. Capture the support matrix above in a discoverable,
-maintained location so the "what does each scheduler read" question never needs another
-grep.
+```
+BaseSchedulerConfig            # cross-cutting fields; scheduler_type discriminator
+├── BatchConfig                # + allowed_instance_types
+└── K8SConfig                  # + k8s_os_overhead_gb, time_window_policy, tiers
+    └── K8SPlusConfig          # + provisioner
+```
 
-Depends on: BSIM-E20 (tier registry — the `tiers` cross-reference validator must keep
-working unchanged)
+`SchedulerConfig` becomes a Pydantic **discriminated union** on `scheduler_type`
+(`Literal[...]` per subclass), so `load_scheduler_config` returns the concrete subclass —
+its type *is* the scheduler. The CLI `--scheduler` flag is removed; the type is derived
+from the loaded config. A Batch config carrying a K8S field is now a hard validation error
+(unknown field), not a silent no-op. Configs and fixtures hard-migrate to the new shape;
+no flat→nested back-compat shim.
+
+Depends on: BSIM-E20 (tier model lives on `K8SConfig`); references BSIM-E17 (prior art).
 
 ---
 
-## BSIM-109 — Introduce `K8SConfig` sub-model for K8S-family fields
+## BSIM-109 — Discriminated-union per-scheduler config schemas
 
 **Type:** Task | **Priority:** High | **Status:** To Do
 
 **Description:**
-Add a `K8SConfig` Pydantic model that holds the two K8S-family-only fields, and relocate
-them off the flat `SchedulerConfig`:
-
-```yaml
-# before
-scheduler_type: k8s
-k8s_os_overhead_gb: 2.0
-time_window_policy: [...]
-
-# after
-scheduler_type: k8s
-k8s:
-  os_overhead_gb: 2.0
-  time_window_policy: [...]
-```
-
-`K8SConfig` fields:
-- `os_overhead_gb: NonNegativeFloat = 2.0`
-- `time_window_policy: list[TimeWindowPolicy] | None = None`
-
-`SchedulerConfig.k8s: K8SConfig | None = None`. The already-typed sub-models (`tiers`,
-`provisioner`, `storage`) and every cross-cutting field stay where they are.
-
-Update all read-sites — `k8s_scheduler.py`, `k8s_plus_scheduler.py`,
-`k8s_plus_two_queue.py` — from `cfg.k8s_os_overhead_gb` / `cfg.time_window_policy` to
-`cfg.k8s.os_overhead_gb` / `cfg.k8s.time_window_policy` (guarding for `cfg.k8s is None`).
-The Batch scheduler must not reference `cfg.k8s` at all.
-
-No backward-compat shim: a flat `k8s_os_overhead_gb` or `time_window_policy` key is an
-unknown field at the `SchedulerConfig` level. Migrate the 7 config files that set these
-keys and the conftest fixtures to the nested shape in the same change.
-
-The BSIM-104 tier cross-reference validator (named-tier references in
-`time_window_policy` must exist in `tiers`) must continue to work — it now reads
-`self.k8s.time_window_policy` and `self.tiers`.
+Introduce `BaseSchedulerConfig` holding the cross-cutting fields, and the subclasses
+`BatchConfig`, `K8SConfig`, `K8SPlusConfig` per the support matrix (inheritance:
+`K8SPlusConfig(K8SConfig)` adds `provisioner`; `K8SConfig` adds `os_overhead_gb` /
+`time_window_policy` / `tiers`; `BatchConfig` adds `allowed_instance_types` per BSIM-115).
+Each subclass pins `scheduler_type: Literal[...]`. Expose
+`SchedulerConfig = Annotated[Union[...], Field(discriminator="scheduler_type")]` and have
+`load_scheduler_config` return the union (concrete subclass). Update every read-site to
+the typed attribute paths; Batch code must not reference K8S attributes (and now can't —
+they don't exist on `BatchConfig`). Hard-migrate all config files and conftest fixtures.
 
 **Acceptance Criteria:**
-- `K8SConfig` model validates `os_overhead_gb` and `time_window_policy`
-- `SchedulerConfig.k8s: K8SConfig | None`; the cross-tier reference validator still
-  rejects a window referencing an undeclared tier
-- All three K8S schedulers read `cfg.k8s.*`; Batch never references `cfg.k8s`
-- A scheduler with `cfg.k8s is None` behaves as today's "no policy, default overhead"
-- All 7 affected config files and the conftest fixtures migrated to the nested shape
+- `BaseSchedulerConfig` + `BatchConfig` / `K8SConfig` / `K8SPlusConfig` with field homes
+  per the support matrix; `scheduler_type` is a per-subclass `Literal`
+- `load_scheduler_config` returns the discriminated subclass; the BSIM-104 tier
+  cross-reference validator still works on `K8SConfig`/`K8SPlusConfig`
+- A Batch config containing a K8S field (`tiers`, `k8s_os_overhead_gb`, …) raises
+  `ValidationError`
+- All schedulers read their typed config; no scheduler reads another's fields
+- All config files + conftest fixtures migrated; no flat-`SchedulerConfig` left
 - Full test suite green
+
+---
+
+## BSIM-123 — Derive scheduler type from config; remove the `--scheduler` flag
+
+**Type:** Task | **Priority:** High | **Status:** To Do
+**Depends on:** BSIM-109 (delivers it structurally; the fix itself is also viable on the
+current unified `scheduler_type` if landed first)
+
+**Description:**
+Make the loaded scheduler config the single source of truth for which scheduler runs.
+Remove `--scheduler` from `simulate`, `compare`, and `scripts/generate_node_timelines.py`;
+derive the type from the config (`cfg.scheduler_type`, or the discriminated subclass after
+BSIM-109). This eliminates the redundancy that produced the `so*-k8splus` mislabel — the
+name and the run can no longer disagree because there is only one input.
+
+**Acceptance Criteria:**
+- `simulate` / `compare` / `generate_node_timelines` no longer accept `--scheduler`
+- The scheduler is taken from the config; running a `k8splus` config runs K8S+ (the so4
+  drift is structurally impossible)
+- `run_one` is called with the type derived from the config, not a separate argument
+- Help text / docs updated; a test asserts the derived type matches the config
+- Any wrapper/script passing `--scheduler` is updated
+
+---
+
+## BSIM-115 — `allowed_instance_types` on `BatchConfig`
+
+**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Depends on:** BSIM-109
+
+**Description:**
+Batch has no way to restrict its instance set — `cheapest_fitting` searches the whole
+registry, so scoping it to a subset requires forking the registry. Add
+`allowed_instance_types: list[str] | None` to `BatchConfig` (None = whole registry,
+today's behaviour) scoping `BatchScheduler.cheapest_fitting`.
+
+Deliberately Batch-only: the K8S side derives its instance set differently — the K8S+
+`provisioner.allowed_instance_types` applies only when no tiers are defined, and in tier
+mode the effective set is the union of *referenced* tiers' `spawn_instance_class`. A shared
+field would misrepresent that asymmetry.
+
+**Acceptance Criteria:**
+- `BatchConfig.allowed_instance_types` scopes Batch instance selection; None = whole
+  registry (current behaviour preserved)
+- A restricted run never launches an excluded type even when it is the cheapest fit; falls
+  to the cheapest *allowed* fit, or no-fit if none qualifies
+- The field exists only on `BatchConfig`
+- Tests cover restricted and unrestricted paths
 
 ---
 
 ## BSIM-110 — Remove dead `idle_check_interval_seconds`
 
 **Type:** Task | **Priority:** Medium | **Status:** To Do
+**Depends on:** BSIM-109
 
 **Description:**
-No scheduler reads `idle_check_interval_seconds` (confirmed by read-site audit). Remove
-the field from `SchedulerConfig` and strip it from every config file and test fixture
-that sets it.
+No scheduler reads `idle_check_interval_seconds` (read-site audit). It simply does not
+appear on any of the new config classes. Strip it from every config file and fixture that
+sets it.
 
 **Acceptance Criteria:**
-- Field removed from `SchedulerConfig`
+- Field absent from `BaseSchedulerConfig` and all subclasses
 - Removed from every config file and conftest fixture that set it
-- A config still setting `idle_check_interval_seconds` is handled per Pydantic's default
-  for unknown fields; a test documents the resulting behaviour
+- A config still setting it raises `ValidationError` (unknown field) — verified by test
 - Full test suite green
-
----
-
-## BSIM-111 — Document the scheduler-config support matrix
-
-**Type:** Task | **Priority:** Medium | **Status:** To Do
-**Depends on:** BSIM-109, BSIM-110
-
-**Description:**
-Capture the per-scheduler field support matrix (which of Batch / K8S / K8S+ reads each
-`SchedulerConfig` field) in a discoverable, maintained location so config authors can
-see at a glance what a given scheduler honours versus ignores. Reflect the post-E21
-shape: the `k8s:` sub-model and the removed `idle_check_interval_seconds`.
-
-Target locations:
-- The `SchedulerConfig` (and `K8SConfig`) class docstring — the matrix lives next to the
-  fields it describes
-- A config reference section under `docs/` linked from the configs directory, holding
-  the full table plus the "Batch silently ignores K8S/tier fields, including admission
-  control" caveat established in BSIM-E20
-
-**Acceptance Criteria:**
-- Support matrix present in the `SchedulerConfig` docstring, grouped by verdict
-  (cross-cutting / K8S-family / K8S+-only)
-- A `docs/` config reference contains the full table and the Batch-ignores-tiers caveat
-- Matrix reflects the nested `k8s:` shape and omits the removed dead field
-- The doc notes that adding a new `SchedulerConfig` field requires updating the matrix
 
 ---
 
 ## BSIM-112 — Warn when `allowed_instance_types` is set alongside `tiers`
 
 **Type:** Task | **Priority:** Medium | **Status:** To Do
+**Depends on:** BSIM-109
 
 **Description:**
-When both `tiers` and `provisioner` are configured on a K8S+ scheduler, the provisioner's
-`allowed_instance_types` has no effect on instance selection: scale-out runs through the
-joint tier provisioner, which picks instances solely from each tier's
-`spawn_instance_class`. Both read paths for `allowed_instance_types`
-(`_select_instance_for_overflow` and the `provisioner` branch of
-`_cheapest_fitting_for_job`) are unreachable once `tiers` is non-empty. The field is
-silently inert — a foot-gun for anyone who carefully curates it expecting it to constrain
-launches.
-
-Emit a load-time warning when `tiers` is non-empty **and**
-`provisioner.allowed_instance_types` is non-empty, stating that `allowed_instance_types`
-is ignored for instance selection in tier mode (tier `spawn_instance_class` governs), and
-that the provisioner still drives scale-in lifecycle (TTLs and consolidation). Do not
-reject the config: the provisioner remains meaningful for lifecycle, so this is a warning,
-not an error — consistent with the `queues→tiers` deprecation style.
-
-Out of scope: changing selection semantics (tiers correctly own instance choice); this is
-purely surfacing the dead-config condition.
+On `K8SPlusConfig`, `provisioner.allowed_instance_types` has no effect on instance
+selection when `tiers` is non-empty — scale-out runs through the joint tier provisioner,
+which picks instances from each tier's `spawn_instance_class`. The field is silently inert,
+a foot-gun for anyone who curates it. Emit a load-time warning when both are set; do not
+reject (the provisioner still drives scale-in lifecycle), consistent with deprecation-style
+warnings.
 
 **Acceptance Criteria:**
-- A `SchedulerConfig` with non-empty `tiers` and a `provisioner` whose
-  `allowed_instance_types` is non-empty emits a warning at load time
-- The warning names `allowed_instance_types` and states it is ignored for selection while
-  the provisioner still governs scale-in lifecycle
-- No warning when only one of `tiers` / `provisioner.allowed_instance_types` is set
-- Config is not rejected; the provisioner's lifecycle fields remain in effect
-- A test asserts the warning fires (and does not fire in the single-feature cases)
+- A `K8SPlusConfig` with non-empty `tiers` and a `provisioner` whose
+  `allowed_instance_types` is non-empty warns at load time
+- The warning states the field is ignored for selection while the provisioner still governs
+  scale-in lifecycle
+- No warning when only one is set; config is not rejected
+- A test asserts the warning fires (and stays silent in single-feature cases)
+
+---
+
+## BSIM-114 — Preflight tier-compatibility validation (centroids ↔ scheduler tiers)
+
+**Type:** Task | **Priority:** High | **Status:** To Do
+**Depends on:** BSIM-104 (E20 tier model); BSIM-109
+
+**Description:**
+`compatible_tiers` on a centroid references tier names defined in a *separate* scheduler
+config file, so Pydantic can't validate the reference at load time — a typo'd or
+physically-impossible tier name surfaces only at run time. Hand-maintaining long
+semicolon-delimited tier strings across two files produced, in one editing session, three
+error classes: missing tier names, a `162`/`192` naming drift, and c-family tiers whose
+`spike_max_gb` exceeded the node's RAM. Add a `validate_config_pair(sim_config,
+scheduler_config)` preflight (invoked by the runner / orchestrator), asserting:
+
+1. **Reference integrity (error)** — every tier named in any centroid `compatible_tiers`
+   and `TimeWindowOverride.compatible_tiers` exists in the scheduler's `tiers`.
+2. **Physical validity (error)** — every `TierProfile` has
+   `spike_max_gb < instance.ram_gb - os_overhead`, leaving a positive schedulable zone.
+   (May also run as a standalone `K8SConfig` validator; needs only the registry.)
+3. **Burst reachability (warning)** — for each centroid bin, at least one listed tier can
+   host the bin's `min_spike`, so no bin is dead-on-arrival.
+
+**Acceptance Criteria:**
+- Rejects a centroid `compatible_tiers` naming an undeclared tier (names centroid + bin)
+- Rejects a `TierProfile` whose `spike_max_gb >= instance.ram_gb − os_overhead`
+- Warns when a centroid bin has no burst-viable tier among its listed tiers
+- Passes cleanly for the corrected `jch_centroids_v04B.yaml` × `demo_k8splus_schedulerC.yaml`
+  pair (regression fixture: 12/12 bins, 36 tiers)
+- The runner / orchestrator calls the check before simulating; failure aborts clearly
+
+---
+
+## BSIM-111 — Document the per-scheduler config model
+
+**Type:** Task | **Priority:** Low | **Status:** To Do
+**Depends on:** BSIM-109, BSIM-110
+
+**Description:**
+With per-scheduler schemas, the "what does each scheduler read" question is answered by
+the type hierarchy itself — so this shrinks to a short orientation: a class-level docstring
+on `BaseSchedulerConfig` summarising the cross-cutting/per-scheduler split, and a brief
+`docs/` config-reference pointing at the three subclasses plus the "Batch ignores tiers,
+including their admission control" caveat from E20. No standalone support-matrix table to
+maintain — the schema is the matrix.
+
+**Acceptance Criteria:**
+- `BaseSchedulerConfig` (and subclasses) carry docstrings describing their field scope
+- A short `docs/` config reference names the three schemas and links the E20 caveat
+- The doc notes that a new scheduler field goes on the class that consumes it
