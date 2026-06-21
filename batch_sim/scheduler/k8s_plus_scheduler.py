@@ -316,7 +316,7 @@ class K8SPlusScheduler:
             self._capacity_cache[cache_key] = compute_k8s_capacity(
                 instance=instance,
                 spike_max_gb=spike_max,
-                os_overhead_gb=self.cfg.k8s_os_overhead_gb,
+                os_overhead_gb=self.cfg.os_overhead_gb,
             )
         return self._capacity_cache[cache_key]
 
@@ -356,7 +356,7 @@ class K8SPlusScheduler:
                 if inst is None:
                     return None
                 cap = self._k8s_capacity(inst)
-                if (inst.ram_gb >= peak_ram_gb + self.cfg.k8s_os_overhead_gb
+                if (inst.ram_gb >= peak_ram_gb + self.cfg.os_overhead_gb
                         and inst.vcpu >= vcpu
                         and cap.effective_schedulable_gb >= soft_gb):
                     return inst
@@ -599,7 +599,7 @@ class K8SPlusScheduler:
         """
         p = self.cfg.provisioner
         first_peak, first_soft, first_vcpu = overflow[0]
-        min_ram = first_peak + self.cfg.k8s_os_overhead_gb
+        min_ram = first_peak + self.cfg.os_overhead_gb
         best_score = -1.0
         best_inst = None
         for inst_name in p.allowed_instance_types:
@@ -637,7 +637,7 @@ class K8SPlusScheduler:
         Legacy time_window_policy path: uses active window band instances.
         No-policy fallback: full registry sorted by price.
         """
-        min_ram = peak_ram_gb + self.cfg.k8s_os_overhead_gb
+        min_ram = peak_ram_gb + self.cfg.os_overhead_gb
         if self._tier_defs and tier_name:
             tdef = self._tier_defs.get(tier_name)
             if tdef is not None:
@@ -849,7 +849,7 @@ class K8SPlusScheduler:
         cap = self._k8s_capacity(instance, effective_tier)
         permits = self._sem_permits(instance, effective_tier)
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
-                         os_overhead_gb=self.cfg.k8s_os_overhead_gb)
+                         os_overhead_gb=self.cfg.os_overhead_gb)
         self._nodes[node_id] = node
         self._sems[node_id] = NodeSemaphore(env, permits)
         if effective_tier:

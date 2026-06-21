@@ -3,7 +3,7 @@ import pytest
 import numpy as np
 from batch_sim.core.schemas import (
     CentroidConfig, SimulationConfig, InstanceTypeConfig,
-    InstanceRegistryConfig, SchedulerConfig, SchedulerType, InstanceFamily
+    InstanceRegistryConfig, BatchConfig, K8SConfig, SchedulerType, InstanceFamily
 )
 from batch_sim.generator.event_list import build_event_list, EventList
 from batch_sim.registry.instance_registry import InstanceRegistry
@@ -55,15 +55,15 @@ def registry(instance_types):
 
 @pytest.fixture
 def batch_cfg():
-    return SchedulerConfig(scheduler_type=SchedulerType.BATCH,
+    return BatchConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
         idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0)
 
 @pytest.fixture
 def k8s_cfg():
-    return SchedulerConfig(scheduler_type=SchedulerType.K8S,
+    return K8SConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
         idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0,
-        k8s_os_overhead_gb=1.0)
+        os_overhead_gb=1.0)

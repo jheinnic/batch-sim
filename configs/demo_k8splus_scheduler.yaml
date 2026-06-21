@@ -18,7 +18,7 @@
 #   Band 1: (0, 32] GB  → c7i.16xlarge  (light centroid: 8/16/32 GB bins)
 #   Band 2: (32, 256] GB → m7i.16xlarge  (heavy centroid: 64/128 GB bins)
 #
-# Packing headroom per instance (physical_ram = ram_gb - k8s_os_overhead_gb = X - 2):
+# Packing headroom per instance (physical_ram = ram_gb - os_overhead_gb = X - 2):
 #   c7i.16xlarge: 126 GB physical → up to 3 light jobs at the 32 GB bin
 #   m7i.16xlarge: 254 GB physical → 3 heavy jobs at 64 GB, 1 job at 128 GB
 #
@@ -40,7 +40,7 @@ idle_timeout_seconds: 300
 idle_check_interval_seconds: 30
 max_retries: 3
 replay_delay_seconds: 30
-k8s_os_overhead_gb: 2.0
+os_overhead_gb: 2.0
 
 # E17 / BSIM-86: demand-based provisioning.
 # A new node is only launched if a job has been waiting at least 90 s AND the

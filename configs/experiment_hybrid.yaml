@@ -45,6 +45,6 @@ base_scheduler:
   idle_check_interval_seconds: 30
   max_retries: 3
   replay_delay_seconds: 10
-  k8s_os_overhead_gb: 2.0
+  os_overhead_gb: 2.0
 
 random_seed: 42

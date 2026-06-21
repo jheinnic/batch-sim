@@ -61,7 +61,7 @@ def k8s_cfg_path(tmp_path):
         "sla_target_seconds": 600,
         "warmup_delay_seconds": 5,
         "idle_timeout_seconds": 30,
-        "k8s_os_overhead_gb": 2.0,
+        "os_overhead_gb": 2.0,
     }
     p = tmp_path / "k8s.yaml"
     p.write_text(yaml.safe_dump(cfg))

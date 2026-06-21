@@ -222,9 +222,8 @@ class TestBSIM91StorageSchema:
         assert batch_cfg.storage is None
 
     def test_scheduler_config_storage_present(self):
-        from batch_sim.core.schemas import SchedulerConfig, SchedulerType
-        cfg = SchedulerConfig(scheduler_type=SchedulerType.BATCH,
-                              storage=StoragePoolConfig(volume_size_gb=2000.0))
+        from batch_sim.core.schemas import BatchConfig
+        cfg = BatchConfig(storage=StoragePoolConfig(volume_size_gb=2000.0))
         assert cfg.storage is not None
         assert cfg.storage.volume_size_gb == 2000.0
 
@@ -258,3 +257,49 @@ class TestScorecardIO:
         d = json.loads(p.read_text())
         assert d["scheduler_type"] == "batch"
         assert d["cost_summary"]["total_cost_usd"] > 0
+
+
+class TestPerSchedulerConfigSchemas:
+    """BSIM-109: SchedulerConfig is a discriminated union of per-scheduler schemas."""
+
+    def test_discriminator_routes_to_subclass(self):
+        from pydantic import TypeAdapter
+        from batch_sim.core.schemas import (
+            SchedulerConfig, BatchConfig, K8SConfig, K8SPlusConfig)
+        ta = TypeAdapter(SchedulerConfig)
+        assert type(ta.validate_python({"scheduler_type": "batch"})) is BatchConfig
+        assert type(ta.validate_python({"scheduler_type": "k8s"})) is K8SConfig
+        assert type(ta.validate_python({"scheduler_type": "k8splus"})) is K8SPlusConfig
+
+    def test_load_scheduler_config_returns_concrete_subclass(self):
+        from batch_sim.core.config_loader import load_scheduler_config
+        from batch_sim.core.schemas import K8SConfig, K8SPlusConfig
+        assert type(load_scheduler_config("configs/scheduler_reference.yaml")) is K8SConfig
+        assert type(load_scheduler_config("configs/demo_k8splus_schedulerC.yaml")) is K8SPlusConfig
+
+    def test_batch_config_rejects_k8s_field(self):
+        # extra='forbid': a Batch config carrying a K8S field is a hard error, not a no-op
+        from batch_sim.core.schemas import BatchConfig
+        with pytest.raises(Exception):
+            BatchConfig(tiers=[])
+        with pytest.raises(Exception):
+            BatchConfig(os_overhead_gb=2.0)
+
+    def test_field_homes(self):
+        from batch_sim.core.schemas import BatchConfig, K8SConfig, K8SPlusConfig
+        assert not hasattr(BatchConfig(), "tiers")          # K8S field absent on Batch
+        assert hasattr(K8SConfig(), "tiers")                # K8S-family
+        assert not hasattr(K8SConfig(), "provisioner")      # K8S+-only
+        assert hasattr(K8SPlusConfig(), "provisioner")
+        assert hasattr(K8SPlusConfig(), "tiers")            # inherits K8S fields
+        # cross-cutting fields on all three
+        for cls in (BatchConfig, K8SConfig, K8SPlusConfig):
+            assert hasattr(cls(), "storage") and hasattr(cls(), "scale_out_poll_s")
+
+    def test_experiment_config_accepts_typed_subclass(self):
+        from batch_sim.core.schemas import ExperimentConfig, K8SConfig
+        ec = ExperimentConfig(event_list_path="x", output_dir="o",
+                              panic_threshold_values=[100.0, 200.0],
+                              base_scheduler_config={"scheduler_type": "k8s", "os_overhead_gb": 3.0})
+        assert type(ec.base_scheduler_config) is K8SConfig
+        assert ec.base_scheduler_config.os_overhead_gb == 3.0

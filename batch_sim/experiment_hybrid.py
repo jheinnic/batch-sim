@@ -106,7 +106,7 @@ class HybridScheduler:
 
         # OKD K8S+ — only sees Q1 jobs; centroid_peak_rams filtered to Q1-eligible
         q1_peaks = [p for p in centroid_peak_rams
-                    if p <= q1_instance.ram_gb - cfg.k8s_os_overhead_gb]
+                    if p <= q1_instance.ram_gb - cfg.os_overhead_gb]
         self._okd = K8SPlusScheduler(
             cfg=cfg, registry=registry, metrics=okd_metrics,
             centroid_peak_rams=q1_peaks or centroid_peak_rams,
@@ -131,7 +131,7 @@ class HybridScheduler:
             peak_ram_gb=p.preprocess_peak_ram_gb,
             steady_ram_gb=p.preprocess_steady_ram_gb,
             q1_instance=self.q1_instance,
-            os_overhead_gb=self.cfg.k8s_os_overhead_gb,
+            os_overhead_gb=self.cfg.os_overhead_gb,
             k=self.k,
         )
         self.routing[job.job_id] = dec

@@ -113,6 +113,18 @@ def run_experiment(
     schedulers: Optional[list[SchedulerType]] = None,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
+    # BSIM-109/E23: the cross-scheduler panic sweep morphed one base config across
+    # scheduler types via model_copy(scheduler_type=...). That is impossible now that
+    # each scheduler is a distinct discriminated-union subclass (a BatchConfig cannot
+    # become a K8SConfig). This legacy multi-scheduler sweep is superseded by E23's
+    # declarative orchestration (named workload × named scheduler grid); deferred per
+    # the E21/E23 same-deliverable cadence. The single-scheduler run_one path is
+    # unaffected.
+    raise NotImplementedError(
+        "run_experiment's cross-scheduler sweep is retired pending E23 orchestration "
+        "(BSIM-118–121). Per-scheduler configs can no longer be morphed via model_copy; "
+        "use run_one per scheduler, or the forthcoming ExperimentManifest orchestrator."
+    )
     if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S, SchedulerType.K8SPLUS]
     output_dir = Path(output_dir); event_list = load_event_list(event_list_path)
     collated: list[dict[str, Any]] = []
