@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings
 from enum import Enum
 from typing import Annotated, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PositiveFloat = Annotated[float, Field(gt=0)]
 NonNegativeFloat = Annotated[float, Field(ge=0)]
@@ -677,33 +677,27 @@ class StoragePoolConfig(BaseModel):
     )
 
 
-class SchedulerConfig(BaseModel):
-    scheduler_type: SchedulerType
+class BaseSchedulerConfig(BaseModel):
+    """BSIM-109: cross-cutting scheduler config — fields every scheduler reads.
+
+    Concrete per-scheduler schemas (BatchConfig / K8SConfig / K8SPlusConfig) extend
+    this and add only the fields their scheduler consumes. `SchedulerConfig` is the
+    discriminated union over them keyed on `scheduler_type`, so a config's scheduler
+    is intrinsic to the config — no separate argument needed (BSIM-123).
+
+    extra='forbid': a config carrying a field its scheduler doesn't consume (e.g. a
+    Batch config with `tiers`) is a hard error, not a silent no-op — the type *is*
+    the support matrix.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     panic_threshold_seconds: PositiveFloat = 300.0
     sla_target_seconds: PositiveFloat = 600.0
     warmup_delay_seconds: PositiveFloat = 90.0
     idle_timeout_seconds: PositiveFloat = 300.0
-    idle_check_interval_seconds: PositiveFloat = 30.0
+    idle_check_interval_seconds: PositiveFloat = 30.0  # BSIM-110: dead, pending removal
     max_retries: PositiveInt = 3
     replay_delay_seconds: NonNegativeFloat = 10.0
-    k8s_os_overhead_gb: NonNegativeFloat = 2.0
-    provisioner: KarpenterProvisioner | None = Field(
-        default=None,
-        description=(
-            "BSIM-E18: Karpenter-style workload-reactive provisioner. "
-            "When present, replaces time_window_policy with demand-scored "
-            "instance selection and three-TTL node lifecycle management."
-        ),
-    )
-    time_window_policy: list[TimeWindowPolicy] | None = Field(
-        default=None,
-        description=(
-            "BSIM-83: Optional time-based scheduling policy. "
-            "When present, partitions the 24-hour day into windows that each "
-            "define memory-band queues with explicit instance classes and drain rules. "
-            "When absent, the scheduler uses its default instance-selection behavior."
-        ),
-    )
     scale_out_threshold_s: NonNegativeFloat = Field(
         default=0.0,
         description=(
@@ -723,6 +717,26 @@ class SchedulerConfig(BaseModel):
         description=(
             "BSIM-91: EBS thin-pool storage cost model. "
             "When absent, storage costs are not tracked."
+        ),
+    )
+
+
+class BatchConfig(BaseSchedulerConfig):
+    """AWS Batch scheduler — cross-cutting fields only (no K8S/tier concepts)."""
+    scheduler_type: Literal[SchedulerType.BATCH] = SchedulerType.BATCH
+
+
+class K8SConfig(BaseSchedulerConfig):
+    """K8S scheduler — adds the K8S-family fields (os overhead, time windows, tiers)."""
+    scheduler_type: Literal[SchedulerType.K8S] = SchedulerType.K8S
+    os_overhead_gb: NonNegativeFloat = 2.0
+    time_window_policy: list[TimeWindowPolicy] | None = Field(
+        default=None,
+        description=(
+            "BSIM-83: Optional time-based scheduling policy. "
+            "When present, partitions the 24-hour day into windows that each "
+            "define memory-band queues with explicit instance classes and drain rules. "
+            "When absent, the scheduler uses its default instance-selection behavior."
         ),
     )
     tiers: list[TierProfile] = Field(
@@ -745,12 +759,11 @@ class SchedulerConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_time_window_policy(self) -> "SchedulerConfig":
-        # BSIM-104: keep deprecated `queues` and canonical `tiers` in sync so both
-        # existing configs (queues) and not-yet-migrated readers (cfg.queues) work.
+    def _validate_k8s(self) -> "K8SConfig":
+        # BSIM-104: keep deprecated `queues` and canonical `tiers` in sync.
         if self.queues and not self.tiers:
             warnings.warn(
-                "SchedulerConfig.queues is deprecated (BSIM-104); use tiers instead.",
+                "K8SConfig.queues is deprecated (BSIM-104); use tiers instead.",
                 DeprecationWarning, stacklevel=2,
             )
             self.tiers = self.queues
@@ -790,6 +803,28 @@ class SchedulerConfig(BaseModel):
                             f"Declared tiers: {sorted(defined)}"
                         )
         return self
+
+
+class K8SPlusConfig(K8SConfig):
+    """K8S+ scheduler — adds the Karpenter-style provisioner (K8S+-only)."""
+    scheduler_type: Literal[SchedulerType.K8SPLUS] = SchedulerType.K8SPLUS
+    provisioner: KarpenterProvisioner | None = Field(
+        default=None,
+        description=(
+            "BSIM-E18: Karpenter-style workload-reactive provisioner. "
+            "When present, replaces time_window_policy with demand-scored "
+            "instance selection and three-TTL node lifecycle management."
+        ),
+    )
+
+
+# BSIM-109: discriminated union — `load_scheduler_config` returns the concrete
+# subclass, so the loaded type *is* the scheduler. Usable as a field type and via
+# TypeAdapter; construct the concrete subclasses directly.
+SchedulerConfig = Annotated[
+    BatchConfig | K8SConfig | K8SPlusConfig,
+    Field(discriminator="scheduler_type"),
+]
 
 
 class ExperimentConfig(BaseModel):

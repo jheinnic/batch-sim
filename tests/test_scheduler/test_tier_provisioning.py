@@ -9,7 +9,7 @@ import numpy as np
 
 from batch_sim.core.schemas import (
     TierProfile, QueueDefinition, parse_tier_set,
-    CentroidConfig, SchedulerConfig, SchedulerType, InstanceTypeConfig,
+    CentroidConfig, K8SConfig, K8SPlusConfig, SchedulerType, InstanceTypeConfig,
     InstanceFamily, InstanceRegistryConfig,
 )
 from batch_sim.core.engine import Priority
@@ -44,12 +44,11 @@ def _tiers():
 
 @pytest.fixture
 def tier_cfg():
-    return SchedulerConfig(
-        scheduler_type=SchedulerType.K8S,
+    return K8SConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=1.0, idle_timeout_seconds=30.0,
         idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0,
-        k8s_os_overhead_gb=0.0, scale_out_threshold_s=0.0, scale_out_poll_s=30.0,
+        os_overhead_gb=0.0, scale_out_threshold_s=0.0, scale_out_poll_s=30.0,
         tiers=_tiers())
 
 
@@ -111,7 +110,7 @@ class TestTierSchema:
             assert any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_tiers_queues_bidirectional_sync(self):
-        sc = SchedulerConfig(scheduler_type=SchedulerType.K8S, tiers=_tiers())
+        sc = K8SConfig(tiers=_tiers())
         assert {t.name for t in sc.queues} == {"small_boost", "medium_boost", "large_boost"}
 
     def test_per_bin_compatible_tiers_length_check(self):
@@ -168,8 +167,7 @@ class TestPlacementMembership:
         assert not sched._node_compatible("n1", ["medium_boost", "large_boost"])
 
     def test_no_tiers_means_any_node(self, tier_registry):
-        cfg = SchedulerConfig(scheduler_type=SchedulerType.K8S,
-                              panic_threshold_seconds=300.0, sla_target_seconds=600.0)
+        cfg = K8SConfig(panic_threshold_seconds=300.0, sla_target_seconds=600.0)
         sched = K8SScheduler(cfg=cfg, registry=tier_registry, metrics=MetricsCollector(),
                              centroid_peak_rams=[10.0], centroid_tier_config={}, rng=None)
         # legacy mode: no tier_defs → any node compatible regardless of job tiers
@@ -224,7 +222,9 @@ class TestJointProvisioner:
 
     def test_k8splus_joint_provisioner_consolidates(self, tier_cfg, tier_registry):
         # K8S+ shares the joint-provisioner logic; outliers must consolidate too.
-        cfg = tier_cfg.model_copy(update={"scheduler_type": SchedulerType.K8SPLUS})
+        # BSIM-109: scheduler type is intrinsic to the class — construct a K8SPlusConfig
+        # from the K8S fixture's fields rather than morphing scheduler_type via model_copy.
+        cfg = K8SPlusConfig(**tier_cfg.model_dump(exclude={"scheduler_type"}))
         jobs = [_make_job(8, 8, ["small_boost", "medium_boost", "large_boost"], jid=f"s{i}")
                 for i in range(10)]
         jobs += [_make_job(8, 60, ["medium_boost", "large_boost"], jid=f"m{i}")

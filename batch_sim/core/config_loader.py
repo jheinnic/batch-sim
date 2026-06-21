@@ -26,8 +26,12 @@ def load_simulation_config(path: str | Path) -> SimulationConfig:
 def load_instance_registry_config(path: str | Path) -> InstanceRegistryConfig:
     return load_config(path, InstanceRegistryConfig)
 
-def load_scheduler_config(path: str | Path) -> SchedulerConfig:
-    return load_config(path, SchedulerConfig)
+def load_scheduler_config(path: str | Path):
+    # BSIM-109: SchedulerConfig is a discriminated union (BatchConfig | K8SConfig |
+    # K8SPlusConfig), not a single model — validate via TypeAdapter, which returns
+    # the concrete subclass keyed on scheduler_type.
+    from pydantic import TypeAdapter
+    return TypeAdapter(SchedulerConfig).validate_python(_load_yaml(path))
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
     return load_config(path, ExperimentConfig)

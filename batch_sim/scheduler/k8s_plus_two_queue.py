@@ -143,7 +143,7 @@ class _QueuePool:
             self._capacity_cache[instance.name] = compute_k8s_capacity(
                 instance=instance,
                 spike_max_gb=spike_max,
-                os_overhead_gb=self.cfg.k8s_os_overhead_gb,
+                os_overhead_gb=self.cfg.os_overhead_gb,
             )
         return self._capacity_cache[instance.name]
 
@@ -179,7 +179,7 @@ class _QueuePool:
                 self._reserved[node.node_id] = job.job_id
                 return
         instance = preferred_instance or self.registry.cheapest_fitting(
-            min_ram_gb=job.profile.peak_ram_gb + self.cfg.k8s_os_overhead_gb,
+            min_ram_gb=job.profile.peak_ram_gb + self.cfg.os_overhead_gb,
             min_vcpu=vcpu,
         )
         if instance:
@@ -248,12 +248,12 @@ class _QueuePool:
         cap = self._k8s_capacity(instance)
         self._capacity_cache[instance.name] = cap
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
-                         os_overhead_gb=self.cfg.k8s_os_overhead_gb)
+                         os_overhead_gb=self.cfg.os_overhead_gb)
         self._nodes[node_id] = node
         self._burst_pools[node_id] = NodeBurstPool(
             env=env,
             node_physical_ram_gb=instance.ram_gb,
-            os_overhead_gb=self.cfg.k8s_os_overhead_gb,
+            os_overhead_gb=self.cfg.os_overhead_gb,
         )
         self._accruers[node_id] = NodeCostAccruer(
             node_id=node_id, instance=instance, launch_time=env.now)

@@ -247,7 +247,7 @@ class K8SScheduler:
                 spike_max = max(fitting) if fitting else 0.0
             self._capacity_cache[cache_key] = compute_k8s_capacity(
                 instance=instance, spike_max_gb=spike_max,
-                os_overhead_gb=self.cfg.k8s_os_overhead_gb)
+                os_overhead_gb=self.cfg.os_overhead_gb)
         return self._capacity_cache[cache_key]
 
     # -----------------------------------------------------------------------
@@ -452,7 +452,7 @@ class K8SScheduler:
         self.metrics.node_launching(env.now, node_id, instance.name)
         cap = self._k8s_capacity(instance, tier_name or "")
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
-                         os_overhead_gb=self.cfg.k8s_os_overhead_gb)
+                         os_overhead_gb=self.cfg.os_overhead_gb)
         self._nodes[node_id] = node
         if tier_name:
             self._node_tier_name[node_id] = tier_name

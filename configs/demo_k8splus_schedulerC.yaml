@@ -30,7 +30,7 @@ panic_threshold_seconds: 600
 sla_target_seconds: 300
 warmup_delay_seconds: 60
 idle_timeout_seconds: 300
-k8s_os_overhead_gb: 2.0
+os_overhead_gb: 2.0
 
 # Demand-based scale-out: only provision when a job has waited at least
 # 90 s, polled every 30 s — avoids thrashing on transient micro-bursts.
