@@ -47,7 +47,7 @@ def tier_cfg():
     return K8SConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=1.0, idle_timeout_seconds=30.0,
-        idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0,
+        max_retries=3, replay_delay_seconds=2.0,
         os_overhead_gb=0.0, scale_out_threshold_s=0.0, scale_out_poll_s=30.0,
         tiers=_tiers())
 

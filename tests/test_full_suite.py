@@ -304,6 +304,82 @@ class TestPerSchedulerConfigSchemas:
         assert type(ec.base_scheduler_config) is K8SConfig
         assert ec.base_scheduler_config.os_overhead_gb == 3.0
 
+    def test_idle_check_interval_seconds_removed(self):
+        # BSIM-110: dead field, no longer accepted by any subclass (extra='forbid')
+        from batch_sim.core.schemas import BatchConfig, K8SConfig, K8SPlusConfig
+        for cls in (BatchConfig, K8SConfig, K8SPlusConfig):
+            assert not hasattr(cls(), "idle_check_interval_seconds")
+            with pytest.raises(Exception):
+                cls(idle_check_interval_seconds=10.0)
+
+
+class TestBatchAllowedInstanceTypes:
+    """BSIM-115: allowed_instance_types scopes Batch instance selection (Batch-only)."""
+
+    def test_field_only_on_batch_config(self):
+        from batch_sim.core.schemas import BatchConfig, K8SConfig
+        assert hasattr(BatchConfig(), "allowed_instance_types")
+        with pytest.raises(Exception):
+            K8SConfig(allowed_instance_types=["m7i.2xlarge"])
+
+    def test_unrestricted_keeps_cheapest_fit(self, registry):
+        from batch_sim.core.schemas import BatchConfig
+        from batch_sim.scheduler.batch_scheduler import BatchScheduler
+        sched = BatchScheduler(cfg=BatchConfig(), registry=registry, metrics=None)
+        inst = sched._cheapest_fitting(min_ram_gb=20, min_vcpu=4)
+        assert inst.name == "m7i.2xlarge"   # cheapest fit across the whole registry
+
+    def test_restricted_skips_excluded_cheaper_type(self, registry):
+        # m7i.2xlarge is the cheapest fit for (20 GB, 4 vcpu) but is excluded;
+        # the restricted set's cheapest fit is r7i.4xlarge.
+        from batch_sim.core.schemas import BatchConfig
+        from batch_sim.scheduler.batch_scheduler import BatchScheduler
+        cfg = BatchConfig(allowed_instance_types=["r7i.4xlarge", "r7i.8xlarge"])
+        sched = BatchScheduler(cfg=cfg, registry=registry, metrics=None)
+        inst = sched._cheapest_fitting(min_ram_gb=20, min_vcpu=4)
+        assert inst.name == "r7i.4xlarge"
+
+    def test_restricted_returns_none_when_no_allowed_type_fits(self, registry):
+        from batch_sim.core.schemas import BatchConfig
+        from batch_sim.scheduler.batch_scheduler import BatchScheduler
+        cfg = BatchConfig(allowed_instance_types=["c7i.4xlarge"])
+        sched = BatchScheduler(cfg=cfg, registry=registry, metrics=None)
+        assert sched._cheapest_fitting(min_ram_gb=100, min_vcpu=4) is None
+
+    def test_overflow_selection_scoped_to_allowed_types(self, registry):
+        from batch_sim.core.schemas import BatchConfig
+        from batch_sim.scheduler.batch_scheduler import BatchScheduler
+        cfg = BatchConfig(allowed_instance_types=["c7i.4xlarge"])
+        sched = BatchScheduler(cfg=cfg, registry=registry, metrics=None)
+        best = sched._select_instance_for_overflow([(20.0, 4)])
+        assert best.name == "c7i.4xlarge"
+
+
+class TestProvisionerAllowedInstanceTypesWarning:
+    """BSIM-112: provisioner.allowed_instance_types is inert once tiers is non-empty."""
+
+    def test_warns_when_both_tiers_and_allowed_instance_types_set(self):
+        from batch_sim.core.schemas import K8SPlusConfig, TierProfile, KarpenterProvisioner
+        with pytest.warns(UserWarning, match="ignored for instance selection"):
+            K8SPlusConfig(
+                tiers=[TierProfile(name="t1", spike_max_gb=8.0, spawn_instance_class="r7i.4xlarge")],
+                provisioner=KarpenterProvisioner(allowed_instance_types=["r7i.4xlarge"]))
+
+    def test_silent_when_only_tiers_set(self):
+        import warnings
+        from batch_sim.core.schemas import K8SPlusConfig, TierProfile
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            K8SPlusConfig(
+                tiers=[TierProfile(name="t1", spike_max_gb=8.0, spawn_instance_class="r7i.4xlarge")])
+
+    def test_silent_when_only_provisioner_set(self):
+        import warnings
+        from batch_sim.core.schemas import K8SPlusConfig, KarpenterProvisioner
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            K8SPlusConfig(provisioner=KarpenterProvisioner(allowed_instance_types=["r7i.4xlarge"]))
+
 
 class TestSchedulerTypeDerivation:
     """BSIM-123: scheduler type comes from the config; no separate --scheduler arg."""

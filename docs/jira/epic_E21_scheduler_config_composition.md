@@ -64,7 +64,7 @@ Depends on: BSIM-E20 (tier model lives on `K8SConfig`); references BSIM-E17 (pri
 
 ## BSIM-109 — Discriminated-union per-scheduler config schemas
 
-**Type:** Task | **Priority:** High | **Status:** To Do
+**Type:** Task | **Priority:** High | **Status:** Done
 
 **Description:**
 Introduce `BaseSchedulerConfig` holding the cross-cutting fields, and the subclasses
@@ -92,7 +92,7 @@ they don't exist on `BatchConfig`). Hard-migrate all config files and conftest f
 
 ## BSIM-123 — Derive scheduler type from config; remove the `--scheduler` flag
 
-**Type:** Task | **Priority:** High | **Status:** To Do
+**Type:** Task | **Priority:** High | **Status:** Done
 **Depends on:** BSIM-109 (delivers it structurally; the fix itself is also viable on the
 current unified `scheduler_type` if landed first)
 
@@ -115,7 +115,7 @@ name and the run can no longer disagree because there is only one input.
 
 ## BSIM-115 — `allowed_instance_types` on `BatchConfig`
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 **Depends on:** BSIM-109
 
 **Description:**
@@ -141,7 +141,7 @@ field would misrepresent that asymmetry.
 
 ## BSIM-110 — Remove dead `idle_check_interval_seconds`
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 **Depends on:** BSIM-109
 
 **Description:**
@@ -159,7 +159,7 @@ sets it.
 
 ## BSIM-112 — Warn when `allowed_instance_types` is set alongside `tiers`
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 **Depends on:** BSIM-109
 
 **Description:**
@@ -214,7 +214,7 @@ scheduler_config)` preflight (invoked by the runner / orchestrator), asserting:
 
 ## BSIM-111 — Document the per-scheduler config model
 
-**Type:** Task | **Priority:** Low | **Status:** To Do
+**Type:** Task | **Priority:** Low | **Status:** Done
 **Depends on:** BSIM-109, BSIM-110
 
 **Description:**

@@ -58,12 +58,12 @@ def batch_cfg():
     return BatchConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
-        idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0)
+        max_retries=3, replay_delay_seconds=2.0)
 
 @pytest.fixture
 def k8s_cfg():
     return K8SConfig(
         panic_threshold_seconds=300.0, sla_target_seconds=600.0,
         warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
-        idle_check_interval_seconds=10.0, max_retries=3, replay_delay_seconds=2.0,
+        max_retries=3, replay_delay_seconds=2.0,
         os_overhead_gb=1.0)
