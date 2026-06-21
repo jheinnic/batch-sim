@@ -137,12 +137,12 @@ class TestNoOp:
 
 
 class TestRegressionFixture:
-    """BSIM-114 acceptance criterion: the corrected jch_centroids_v04B.yaml ×
-    demo_k8splus_schedulerC.yaml pair (12/12 bins, 36 tiers) passes cleanly."""
+    """BSIM-114 acceptance criterion: the corrected jch_centroids_v01.yaml ×
+    jch_k8splus_scheduler.yaml pair (12/12 bins, 36 tiers) passes cleanly."""
 
     def test_real_fixture_pair_passes_with_zero_findings(self):
-        sim_cfg = load_simulation_config("configs/jch_centroids_v04B.yaml")
-        sched_cfg = load_scheduler_config("configs/demo_k8splus_schedulerC.yaml")
+        sim_cfg = load_simulation_config("configs/jch_centroids_v01.yaml")
+        sched_cfg = load_scheduler_config("configs/jch_k8splus_scheduler.yaml")
         registry = InstanceRegistry.from_yaml("configs/instance_registry.yaml")
         assert len(sched_cfg.tiers) == 36
         with warnings.catch_warnings():

@@ -141,7 +141,7 @@ centroids:
     bin_preloader_actual_gb:        [[20, 31], [30, 46]]
     bin_steady_state_hard_limit_gb: [20, 24]
     bin_steady_state_actual_gb:     [[12, 20], [18, 24]]
-    bin_workhorse_scale:            [1.0, 0.3]
+    bin_workhorse_scale:            [1.0, 1.2]
     compatible_tiers:
     - "1r14;2r14;2m14;4r14;4m14;4c14;2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"
     - "2r30;4r30;4m30;8r30;8m30;8c30;4r62;8r62;8m62;16r62;16m62;16c62;4r92;8r92;8m92;16r92;16m92;16c92;8r126;16r126;16m126;8r162;16r162;16m162"

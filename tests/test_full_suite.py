@@ -275,7 +275,7 @@ class TestPerSchedulerConfigSchemas:
         from batch_sim.core.config_loader import load_scheduler_config
         from batch_sim.core.schemas import K8SConfig, K8SPlusConfig
         assert type(load_scheduler_config("configs/scheduler_reference.yaml")) is K8SConfig
-        assert type(load_scheduler_config("configs/demo_k8splus_schedulerC.yaml")) is K8SPlusConfig
+        assert type(load_scheduler_config("configs/jch_k8splus_scheduler.yaml")) is K8SPlusConfig
 
     def test_batch_config_rejects_k8s_field(self):
         # extra='forbid': a Batch config carrying a K8S field is a hard error, not a no-op

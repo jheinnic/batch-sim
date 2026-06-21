@@ -1,0 +1,146 @@
+# configs/jch_k8s_scheduler.yaml
+# Plain K8S scheduler next-best-equivalent of jch_k8splus_scheduler.yaml:
+# same cross-cutting tunables and the same tiers registry, no Karpenter-style
+# provisioner (K8S+-only field). K8SScheduler dispatches to the same BSIM-107
+# joint tier provisioner as K8S+ whenever tiers is non-empty — scale-out
+# timing is still governed by scale_out_threshold_s / scale_out_poll_s below.
+#
+# tiers (below) is the live routing mechanism — compatible_tiers on each
+# centroid names which of these a bin's burst may use (BSIM-104).
+#
+# Instance registry: configs/instance_registry.yaml
+#   Covers c7i / m7i / r7i families from xlarge through 16xlarge.
+
+scheduler_type: k8s
+panic_threshold_seconds: 600
+sla_target_seconds: 300
+warmup_delay_seconds: 60
+idle_timeout_seconds: 300
+os_overhead_gb: 2.0
+
+# Demand-based scale-out: only provision when a job has waited at least
+# 90 s, polled every 30 s — avoids thrashing on transient micro-bursts.
+scale_out_threshold_s: 90
+scale_out_poll_s: 30
+
+storage:
+  initial_volume_count: 2
+  volume_size_gb: 1024
+  expansion_trigger_pct: 0.85
+  ebs_price_per_gb_hour: 0.0001096
+
+tiers:
+  - name: 1r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.xlarge
+  - name: 2r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.2xlarge
+  - name: 2m8
+    spike_max_gb: 8
+    spawn_instance_class: m7i.2xlarge
+  - name: 4r8
+    spike_max_gb: 8
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m8
+    spike_max_gb: 8
+    spawn_instance_class: m7i.4xlarge
+  - name: 4c8
+    spike_max_gb: 8
+    spawn_instance_class: c7i.4xlarge
+
+  - name: 1r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.xlarge
+  - name: 2r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.2xlarge
+  - name: 2m14
+    spike_max_gb: 14
+    spawn_instance_class: m7i.2xlarge
+  - name: 4r14
+    spike_max_gb: 14
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m14
+    spike_max_gb: 14
+    spawn_instance_class: m7i.4xlarge
+  - name: 4c14
+    spike_max_gb: 14
+    spawn_instance_class: c7i.4xlarge
+
+  - name: 2r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.2xlarge
+  - name: 4r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.4xlarge
+  - name: 4m30
+    spike_max_gb: 30
+    spawn_instance_class: m7i.4xlarge
+  - name: 8r30
+    spike_max_gb: 30
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m30
+    spike_max_gb: 30
+    spawn_instance_class: m7i.8xlarge
+  - name: 8c30
+    spike_max_gb: 30
+    spawn_instance_class: c7i.8xlarge
+
+  - name: 4r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.4xlarge
+  - name: 8r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m62
+    spike_max_gb: 62
+    spawn_instance_class: m7i.8xlarge
+  - name: 16r62
+    spike_max_gb: 62
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m62
+    spike_max_gb: 62
+    spawn_instance_class: m7i.16xlarge
+  - name: 16c62
+    spike_max_gb: 62
+    spawn_instance_class: c7i.16xlarge
+
+  - name: 4r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.4xlarge
+  - name: 8r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.8xlarge
+  - name: 8m92
+    spike_max_gb: 92
+    spawn_instance_class: m7i.8xlarge
+  - name: 16r92
+    spike_max_gb: 92
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m92
+    spike_max_gb: 92
+    spawn_instance_class: m7i.16xlarge
+  - name: 16c92
+    spike_max_gb: 92
+    spawn_instance_class: c7i.16xlarge
+
+  - name: 8r126
+    spike_max_gb: 126
+    spawn_instance_class: r7i.8xlarge
+  - name: 16r126
+    spike_max_gb: 126
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m126
+    spike_max_gb: 126
+    spawn_instance_class: m7i.16xlarge
+
+  - name: 8r162
+    spike_max_gb: 162
+    spawn_instance_class: r7i.8xlarge
+  - name: 16r162
+    spike_max_gb: 162
+    spawn_instance_class: r7i.16xlarge
+  - name: 16m162
+    spike_max_gb: 162
+    spawn_instance_class: m7i.16xlarge
