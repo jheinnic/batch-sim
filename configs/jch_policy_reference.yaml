@@ -7,7 +7,7 @@
 #   00:00 – 08:00  (0    – 28800 s)  off-peak:  slow spawn, aggressive drain
 #   08:00 – 24:00  (28800 – 86400 s)  peak:      fast spawn, relaxed drain
 #
-# Instance registry: configs/jch_instance_registry_01.yaml
+# Instance registry: configs/instance_registry.yaml
 #   c7i.16xlarge  128 GB  64 vCPU  $2.856/hr   ← small jobs
 #   m7i.16xlarge  256 GB  64 vCPU  $3.226/hr   ← large jobs (currently unused)
 #   r7i.16xlarge  512 GB  64 vCPU  $4.032/hr   ← extra-large (currently unused)
