@@ -1,4 +1,0 @@
-  instance_types:
-  - {name: c7i.8xlarge,  family: compute, ram_gb:  64, vcpu: 32, hourly_price_usd: 1.4280}
-  - {name: c7i.16xlarge, family: compute, ram_gb: 128, vcpu: 64, hourly_price_usd: 2.8560}
-  - {name: c7i.32xlarge,  family: memory,  ram_gb: 256, vcpu: 128, hourly_price_usd: 5.7120}

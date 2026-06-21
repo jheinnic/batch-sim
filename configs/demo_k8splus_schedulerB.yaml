@@ -10,7 +10,7 @@
 #   E17 (BSIM-87): dynamic workhorse stage timing driven by cpu_boost solver
 #                   is automatic (no config knobs required).
 #
-# Instance registry: configs/jch_instance_registry_01.yaml
+# Instance registry: configs/instance_registry.yaml
 #   c7i.16xlarge  128 GB  64 vCPU  $2.856/hr
 #   m7i.16xlarge  256 GB  64 vCPU  $3.226/hr
 #
