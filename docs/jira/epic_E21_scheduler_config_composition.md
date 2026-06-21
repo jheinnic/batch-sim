@@ -182,7 +182,7 @@ warnings.
 
 ## BSIM-114 — Preflight tier-compatibility validation (centroids ↔ scheduler tiers)
 
-**Type:** Task | **Priority:** High | **Status:** To Do
+**Type:** Task | **Priority:** High | **Status:** Done
 **Depends on:** BSIM-104 (E20 tier model); BSIM-109
 
 **Description:**

@@ -1,4 +1,4 @@
-"""batch_sim CLI — subcommands: generate, simulate, compare, experiment, plot"""
+"""batch_sim CLI — subcommands: generate, simulate, validate-tiers, compare, experiment, plot"""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -64,6 +64,30 @@ def simulate(events, scheduler_config, registry, output, seed):
     console.print(f"[green]✓ Scorecard  → {output}[/green]")
     console.print(f"[green]✓ Event log  → {log_path}[/green]")
     _print_summary(sc)
+
+@cli.command(name="validate-tiers")
+@click.option("--sim-config", required=True, type=click.Path(exists=True))
+@click.option("--scheduler-config", required=True, type=click.Path(exists=True))
+@click.option("--registry", default="configs/instance_registry.yaml", type=click.Path(exists=True))
+def validate_tiers(sim_config, scheduler_config, registry):
+    """BSIM-114: preflight tier-compatibility check for a sim/scheduler config pair.
+
+    Catches what Pydantic can't: compatible_tiers (sim config) referencing tier
+    names that don't exist in the scheduler config's tiers registry, tiers whose
+    spike_max_gb leaves no schedulable zone, and centroid bins with no burst-viable
+    tier. No-ops cleanly for BatchConfig or a tier-less K8SConfig.
+    """
+    from batch_sim.core.config_loader import load_simulation_config, load_scheduler_config
+    from batch_sim.registry.instance_registry import InstanceRegistry
+    from batch_sim.core.tier_preflight import validate_config_pair, TierPreflightError
+    sim_cfg = load_simulation_config(sim_config)
+    sched_cfg = load_scheduler_config(scheduler_config)
+    reg = InstanceRegistry.from_yaml(registry)
+    try:
+        validate_config_pair(sim_cfg, sched_cfg, reg)
+    except TierPreflightError as e:
+        raise click.ClickException(str(e))
+    console.print("[green]✓ Tier preflight passed[/green]")
 
 @cli.command()
 @click.option("--batch", required=True, type=click.Path(exists=True))
