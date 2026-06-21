@@ -695,7 +695,6 @@ class BaseSchedulerConfig(BaseModel):
     sla_target_seconds: PositiveFloat = 600.0
     warmup_delay_seconds: PositiveFloat = 90.0
     idle_timeout_seconds: PositiveFloat = 300.0
-    idle_check_interval_seconds: PositiveFloat = 30.0  # BSIM-110: dead, pending removal
     max_retries: PositiveInt = 3
     replay_delay_seconds: NonNegativeFloat = 10.0
     scale_out_threshold_s: NonNegativeFloat = Field(
@@ -722,8 +721,17 @@ class BaseSchedulerConfig(BaseModel):
 
 
 class BatchConfig(BaseSchedulerConfig):
-    """AWS Batch scheduler — cross-cutting fields only (no K8S/tier concepts)."""
+    """AWS Batch scheduler — cross-cutting fields plus allowed_instance_types.
+    No K8S/tier concepts (see docs/config_reference.md for the Batch-ignores-tiers caveat)."""
     scheduler_type: Literal[SchedulerType.BATCH] = SchedulerType.BATCH
+    allowed_instance_types: list[str] | None = Field(
+        default=None,
+        description=(
+            "BSIM-115: Instance type names Batch may launch. None = whole "
+            "registry (current behaviour). cheapest_fitting and the overflow "
+            "provisioner both scope to this subset when set."
+        ),
+    )
 
 
 class K8SConfig(BaseSchedulerConfig):
@@ -816,6 +824,23 @@ class K8SPlusConfig(K8SConfig):
             "instance selection and three-TTL node lifecycle management."
         ),
     )
+
+    @model_validator(mode="after")
+    def _warn_inert_allowed_instance_types(self) -> "K8SPlusConfig":
+        # BSIM-112: in tier mode, scale-out runs through the joint tier provisioner,
+        # which sources instances from each referenced tier's spawn_instance_class —
+        # provisioner.allowed_instance_types has no effect on selection (the
+        # provisioner still governs scale-in lifecycle, so this is a warning, not
+        # a rejection).
+        if self.tiers and self.provisioner and self.provisioner.allowed_instance_types:
+            warnings.warn(
+                "K8SPlusConfig.provisioner.allowed_instance_types is ignored for "
+                "instance selection while tiers is non-empty (the joint tier "
+                "provisioner sources instances from each tier's spawn_instance_class "
+                "instead); the provisioner's TTL/consolidation settings still apply.",
+                stacklevel=2,
+            )
+        return self
 
 
 # BSIM-109: discriminated union — `load_scheduler_config` returns the concrete

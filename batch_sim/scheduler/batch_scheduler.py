@@ -55,8 +55,22 @@ class BatchScheduler:
                     and node.node_id not in self._reserved
                     and self._batch_fits(node, p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))):
                 self._reserved[node.node_id] = job.job_id; return
-        instance = self.registry.cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
+        instance = self._cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
         if instance: env.process(self._launch_node(env, instance, for_job=job))
+
+    def _allowed_types(self) -> list:
+        """BSIM-115: scope the registry to cfg.allowed_instance_types when set."""
+        allowed = self.cfg.allowed_instance_types
+        if allowed is None:
+            return self.registry.all_types
+        allowed_set = set(allowed)
+        return [t for t in self.registry.all_types if t.name in allowed_set]
+
+    def _cheapest_fitting(self, min_ram_gb: float, min_vcpu: int):
+        for t in self._allowed_types():
+            if t.ram_gb >= min_ram_gb and t.vcpu >= min_vcpu:
+                return t
+        return None
 
     def _scale_out_monitor(self, env):
         """
@@ -123,7 +137,7 @@ class BatchScheduler:
         Ties broken by raw job count so equal-rate types resolve toward larger
         instances, reducing total node count and warmup overhead."""
         best_inst, best_score = None, (-1.0, -1)
-        for inst in self.registry.all_types:
+        for inst in self._allowed_types():
             rem_ram, rem_vcpu = inst.ram_gb, inst.vcpu
             count = 0
             for ram, vcpu in sorted(overflow, reverse=True):

@@ -433,7 +433,7 @@ on a node that has spare bin-packing space rather than always spinning up a no-b
 
 ## BSIM-122 — Adopt NodeBurstPool in mainline K8S+ (GB-aware concurrent boost)
 
-**Type:** Task (bug-fix / boost-model completion) | **Priority:** High | **Status:** To Do
+**Type:** Task (bug-fix / boost-model completion) | **Priority:** High | **Status:** Done
 **Depends on:** BSIM-104
 
 **Description:**
