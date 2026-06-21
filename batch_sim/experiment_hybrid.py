@@ -309,7 +309,7 @@ def run_hybrid_sweep(
         (SchedulerType.BATCH, 'batch_baseline'),
         (SchedulerType.K8S,   'k8s_baseline'),
     ]:
-        sc = run_one(event_list, sched_type, cfg, registry, event_list_path, seed)
+        sc = run_one(event_list, cfg, registry, event_list_path, seed)
         results.append({
             'run_type':      label,
             'q1_instance':   'N/A',

@@ -57,7 +57,6 @@ def _tier_config_from_metadata(metadata: dict[str, Any]) -> "dict[str, dict] | N
 
 def run_one(
     event_list: EventList,
-    scheduler_type: SchedulerType,
     cfg: Any,
     registry: InstanceRegistry,
     event_list_path: str | Path,
@@ -66,7 +65,12 @@ def run_one(
 ) -> Union[Scorecard, tuple[Scorecard, MetricsCollector]]:
     """Run one scheduler configuration and return a Scorecard.
     If return_metrics=True, returns (Scorecard, MetricsCollector) instead.
+
+    BSIM-123: the scheduler is intrinsic to the config (cfg is a BatchConfig /
+    K8SConfig / K8SPlusConfig), so the type is read from cfg.scheduler_type — no
+    separate argument that could disagree with the config.
     """
+    scheduler_type = cfg.scheduler_type
     metrics = MetricsCollector(); rng = random.Random(seed)
     if (scheduler_type == SchedulerType.BATCH):
         from batch_sim.scheduler.batch_scheduler import BatchScheduler
@@ -137,7 +141,7 @@ def run_experiment(
                 cfg = base_cfg.model_copy(update={"panic_threshold_seconds": threshold,
                                                     "scheduler_type": sched_type})
                 progress.update(task, description=f"[{sched_type.value.upper():5s}] {threshold:.0f}s")
-                sc = run_one(event_list=event_list, scheduler_type=sched_type, cfg=cfg,
+                sc = run_one(event_list=event_list, cfg=cfg,
                              registry=registry, event_list_path=event_list_path, seed=seed)
                 assert isinstance(sc, Scorecard)
                 run_dir = output_dir / sched_type.value / f"threshold_{int(threshold)}"

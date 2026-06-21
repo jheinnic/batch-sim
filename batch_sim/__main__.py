@@ -34,24 +34,25 @@ def generate(config, output, seed):
 
 @cli.command()
 @click.option("--events", required=True, type=click.Path(exists=True))
-@click.option("--scheduler", required=True, type=click.Choice(["batch", "k8s", "k8splus"]))
 @click.option("--scheduler-config", required=True, type=click.Path(exists=True))
 @click.option("--registry", default="configs/instance_registry.yaml", type=click.Path(exists=True))
 @click.option("--output", required=True, type=click.Path())
 @click.option("--seed", default=42, show_default=True, type=int)
-def simulate(events, scheduler, scheduler_config, registry, output, seed):
-    """Stage 2: run one scheduler against a saved event list."""
+def simulate(events, scheduler_config, registry, output, seed):
+    """Stage 2: run one scheduler against a saved event list.
+
+    BSIM-123: the scheduler is determined by the config (its scheduler_type), so
+    there is no --scheduler flag to disagree with it.
+    """
     from batch_sim.core.config_loader import load_scheduler_config
-    from batch_sim.core.schemas import SchedulerType
     from batch_sim.registry.instance_registry import InstanceRegistry
     from batch_sim.experiment_runner import run_one
     from batch_sim.generator.event_list import load_event_list
     cfg = load_scheduler_config(scheduler_config)
     reg = InstanceRegistry.from_yaml(registry)
     el = load_event_list(events)
-    console.print(f"[bold]Running {scheduler.upper()}…[/bold]")
-    sc, metrics = run_one(event_list=el, scheduler_type=SchedulerType(scheduler),
-                          cfg=cfg, registry=reg, event_list_path=events,
+    console.print(f"[bold]Running {cfg.scheduler_type.value.upper()}…[/bold]")
+    sc, metrics = run_one(event_list=el, cfg=cfg, registry=reg, event_list_path=events,
                           seed=seed, return_metrics=True)
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     sc.save(output)
