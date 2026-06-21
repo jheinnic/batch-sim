@@ -163,15 +163,13 @@ def run_and_extract(
     else:
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.config_loader import load_scheduler_config
-        from batch_sim.core.schemas import SchedulerType
 
-        cfg      = load_scheduler_config(cfg_path)
+        cfg      = load_scheduler_config(cfg_path)   # BSIM-123: scheduler type intrinsic to cfg
         registry = InstanceRegistry.from_yaml(registry_path)
         cool_off  = el.metadata.get('cool_off_seconds', 0.0)
 
         sc, metrics = run_one(
             event_list=el,
-            scheduler_type=SchedulerType(scheduler_type),
             cfg=cfg,
             registry=registry,
             event_list_path=event_list_path,
@@ -1408,7 +1406,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Generate per-node job timeline charts for a scheduler run.'
     )
-    parser.add_argument('--scheduler', choices=['batch', 'k8s', 'k8splus'], required=True)
+    # BSIM-123: scheduler is derived from --scheduler-config (its scheduler_type),
+    # so there is no --scheduler flag that could disagree with the config.
     parser.add_argument('--events',
                         default='workloads/reference_4h_v1.json',
                         help='Path to event list JSON')
@@ -1435,22 +1434,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    out = Path(args.output or f'results/node_timelines/{args.scheduler}')
+    # BSIM-123: the scheduler is intrinsic to the config.
+    _sch_cfg = load_scheduler_config(args.scheduler_config)
+    scheduler_type = _sch_cfg.scheduler_type.value          # 'batch' | 'k8s' | 'k8splus'
+    os_overhead_gb = getattr(_sch_cfg, 'os_overhead_gb', 0.0)  # absent on Batch → 0.0
+
+    out = Path(args.output or f'results/node_timelines/{scheduler_type}')
     out.mkdir(parents=True, exist_ok=True)
 
     if args.event_log:
         print(f'[--event-log path]  Reading saved event log: {args.event_log}')
     else:
-        print(f'[re-run path]  Re-running {args.scheduler} via run_one()...')
-
-    os_overhead_gb = 0.0
-    if args.scheduler in ('k8s', 'k8splus'):
-        _sch_cfg = load_scheduler_config(args.scheduler_config)
-        os_overhead_gb = getattr(_sch_cfg, 'k8s_os_overhead_gb', 0.0)
+        print(f'[re-run path]  Re-running {scheduler_type} via run_one()...')
 
     node_timelines, metadata = run_and_extract(
         event_list_path=args.events,
-        scheduler_type=args.scheduler,
+        scheduler_type=scheduler_type,
         cfg_path=args.scheduler_config,
         registry_path=args.registry,
         seed=args.seed,
@@ -1467,13 +1466,13 @@ def main() -> None:
     print(f'  summary.json')
 
     print(f'Writing charts to {out}')
-    chart_overview(node_timelines, metadata, out, scheduler_type=args.scheduler)
+    chart_overview(node_timelines, metadata, out, scheduler_type=scheduler_type)
 
     if not args.overview_only:
         nodes_sorted = sorted(node_timelines.items(), key=lambda x: x[1]['launch_t'])
         limit = args.max_per_node or len(nodes_sorted)
         for i, (nid, node) in enumerate(nodes_sorted[:limit]):
-            chart_per_node(nid, node, out, scheduler_type=args.scheduler)
+            chart_per_node(nid, node, out, scheduler_type=scheduler_type)
             if (i + 1) % 10 == 0 or (i + 1) == min(limit, len(nodes_sorted)):
                 print(f'  per-node charts: {i+1}/{min(limit, len(nodes_sorted))}')
 

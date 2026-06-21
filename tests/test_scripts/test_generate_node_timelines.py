@@ -115,7 +115,7 @@ class TestRunAndExtract:
         el = load_event_list(ev_path)
         cfg = load_scheduler_config(k8s_cfg_path)
         registry = InstanceRegistry.from_yaml(str(REGISTRY))
-        _, metrics = run_one(event_list=el, scheduler_type=SchedulerType.K8S, cfg=cfg,
+        _, metrics = run_one(event_list=el, cfg=cfg,
                              registry=registry, event_list_path=ev_path, seed=42,
                              return_metrics=True)
         log_path = tmp_path / "saved_events.json"

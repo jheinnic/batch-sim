@@ -155,19 +155,19 @@ class TestBatchIntegration:
     def test_all_jobs_complete(self, event_list, batch_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.BATCH, batch_cfg, registry, "test")
+        sc = run_one(event_list, batch_cfg, registry, "test")
         assert sc.job_stats.pool_job_count + sc.job_stats.pool_terminal_failure_count == len(event_list)
 
     def test_cost_positive(self, event_list, batch_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.BATCH, batch_cfg, registry, "test")
+        sc = run_one(event_list, batch_cfg, registry, "test")
         assert sc.cost_summary.total_cost_usd > 0
 
     def test_per_centroid_stats(self, event_list, batch_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.BATCH, batch_cfg, registry, "test")
+        sc = run_one(event_list, batch_cfg, registry, "test")
         assert len(sc.job_stats.per_centroid) > 0
 
 
@@ -175,19 +175,19 @@ class TestK8SIntegration:
     def test_all_jobs_complete(self, event_list, k8s_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.K8S, k8s_cfg, registry, "test")
+        sc = run_one(event_list, k8s_cfg, registry, "test")
         assert sc.job_stats.pool_job_count + sc.job_stats.pool_terminal_failure_count >= len(event_list)
 
     def test_cost_positive(self, event_list, k8s_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.K8S, k8s_cfg, registry, "test")
+        sc = run_one(event_list, k8s_cfg, registry, "test")
         assert sc.cost_summary.total_cost_usd > 0
 
     def test_capacity_report(self, event_list, k8s_cfg, registry):
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.K8S, k8s_cfg, registry, "test")
+        sc = run_one(event_list, k8s_cfg, registry, "test")
         assert sc.k8s_capacity_report is not None
 
 
@@ -251,7 +251,7 @@ class TestScorecardIO:
         import json
         from batch_sim.experiment_runner import run_one
         from batch_sim.core.schemas import SchedulerType
-        sc = run_one(event_list, SchedulerType.BATCH, batch_cfg, registry, "test")
+        sc = run_one(event_list, batch_cfg, registry, "test")
         p = tmp_path / "scorecard.json"; sc.save(p)
         assert p.exists()
         d = json.loads(p.read_text())
@@ -303,3 +303,20 @@ class TestPerSchedulerConfigSchemas:
                               base_scheduler_config={"scheduler_type": "k8s", "os_overhead_gb": 3.0})
         assert type(ec.base_scheduler_config) is K8SConfig
         assert ec.base_scheduler_config.os_overhead_gb == 3.0
+
+
+class TestSchedulerTypeDerivation:
+    """BSIM-123: scheduler type comes from the config; no separate --scheduler arg."""
+
+    def test_run_one_derives_type_from_config(self, event_list, k8s_cfg, batch_cfg, registry):
+        from batch_sim.experiment_runner import run_one
+        sk = run_one(event_list, k8s_cfg, registry, "test")
+        assert sk.scheduler_type == k8s_cfg.scheduler_type.value == "k8s"
+        sb = run_one(event_list, batch_cfg, registry, "test")
+        assert sb.scheduler_type == batch_cfg.scheduler_type.value == "batch"
+
+    def test_simulate_cli_has_no_scheduler_flag(self):
+        from batch_sim.__main__ import simulate
+        names = {p.name for p in simulate.params}
+        assert "scheduler" not in names          # the redundant flag is gone
+        assert "scheduler_config" in names       # config is the single source of truth
