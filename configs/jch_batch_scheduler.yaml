@@ -1,0 +1,41 @@
+# configs/jch_batch_scheduler.yaml
+# AWS Batch next-best-equivalent of jch_k8splus_scheduler.yaml. Batch has no
+# tier concept — it ignores compatible_tiers and the BSIM-108 admission check
+# entirely (see docs/config_reference.md) — so the closest approximation is
+# allowed_instance_types: the union of every spawn_instance_class referenced
+# across the K8S+ tiers registry, scoping Batch's cheapest-fit and overflow
+# provisioner (BSIM-115) to the same instance-type universe.
+#
+# Instance registry: configs/instance_registry.yaml
+#   Covers c7i / m7i / r7i families from xlarge through 16xlarge.
+
+scheduler_type: batch
+panic_threshold_seconds: 600
+sla_target_seconds: 300
+warmup_delay_seconds: 60
+idle_timeout_seconds: 300
+
+# Demand-based scale-out: only provision when a job has waited at least
+# 90 s, polled every 30 s — avoids thrashing on transient micro-bursts.
+scale_out_threshold_s: 90
+scale_out_poll_s: 30
+
+allowed_instance_types:
+  - r7i.xlarge
+  - r7i.2xlarge
+  - m7i.2xlarge
+  - r7i.4xlarge
+  - m7i.4xlarge
+  - c7i.4xlarge
+  - r7i.8xlarge
+  - m7i.8xlarge
+  - c7i.8xlarge
+  - r7i.16xlarge
+  - m7i.16xlarge
+  - c7i.16xlarge
+
+storage:
+  initial_volume_count: 2
+  volume_size_gb: 1024
+  expansion_trigger_pct: 0.85
+  ebs_price_per_gb_hour: 0.0001096

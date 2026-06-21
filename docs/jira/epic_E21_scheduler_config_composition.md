@@ -206,7 +206,7 @@ scheduler_config)` preflight (invoked by the runner / orchestrator), asserting:
 - Rejects a centroid `compatible_tiers` naming an undeclared tier (names centroid + bin)
 - Rejects a `TierProfile` whose `spike_max_gb >= instance.ram_gb − os_overhead`
 - Warns when a centroid bin has no burst-viable tier among its listed tiers
-- Passes cleanly for the corrected `jch_centroids_v04B.yaml` × `demo_k8splus_schedulerC.yaml`
+- Passes cleanly for the corrected `jch_centroids_v01.yaml` × `jch_k8splus_scheduler.yaml`
   pair (regression fixture: 12/12 bins, 36 tiers)
 - The runner / orchestrator calls the check before simulating; failure aborts clearly
 

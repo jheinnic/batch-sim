@@ -76,13 +76,13 @@ A new Pydantic `ExperimentManifest` model (distinct from the narrow existing
 
 ```yaml
 workloads:                       # name → generate-input tuple
-  m20:   { config: configs/jch_centroids_v04B.yaml, output: workloads/m20.json, seed: 8175 }
+  m20:   { config: configs/jch_centroids_v01.yaml, output: workloads/m20.json, seed: 8175 }
 schedulers:                      # name → (scheduler config, type)
-  k8splusC: { config: configs/demo_k8splus_schedulerC.yaml, type: k8splus }
-  batch:    { config: configs/scheduler_reference.yaml,      type: batch }
+  k8splus: { config: configs/jch_k8splus_scheduler.yaml, type: k8splus }
+  batch:   { config: configs/jch_batch_scheduler.yaml,   type: batch }
 run:                             # grid to execute
   workloads:  [m20]
-  schedulers: [k8splusC, batch]
+  schedulers: [k8splus, batch]
 ```
 
 The schema owns the **output-naming convention**: a run is keyed `<workload>-<scheduler>`,

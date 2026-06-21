@@ -1,0 +1,77 @@
+# reference_centroids_24h.yaml — BSIM-49: 24-hour simulation with diurnal arrival pattern
+#
+# Arrival rates are base rates (hours 9-17 peak).
+# The experiment runner applies the multiplier_by_hour scaling below.
+# multiplier_by_hour: 24 values, one per hour starting at midnight (hour 0).
+# Trough = 0.1 (overnight), ramp up morning, peak 1.0 business hours, ramp down evening.
+
+horizon_seconds: 86400
+random_seed: 3816
+cool_off_seconds: 3600  # 1-hour tail after horizon; no new arrivals, running jobs finish
+network_bandwidth_mbps: 10000  # 10 Gbps — conservative sustained estimate for m7i/r7i/c7i instances
+
+arrival_multiplier_by_hour:
+  [0.10, 0.08, 0.07, 0.07, 0.08, 0.12,   # 00-05 (overnight trough)
+   0.22, 0.45, 0.72, 0.90, 1.00, 1.00,   # 06-11 (morning ramp + peak)
+   1.00, 1.00, 0.98, 0.95, 0.88, 0.75,   # 12-17 (peak + early evening drop)
+   0.55, 0.38, 0.28, 0.20, 0.15, 0.12]   # 18-23 (evening taper)
+
+centroids:
+  - id: type1
+    label: "Compute-Heavy"
+    description: "Long multi-stage CPU-bound jobs."
+    arrival_rate_per_hour: 2
+    burst_size_min: 8
+    burst_size_max: 12
+    pareto_alpha: 2.2
+    pareto_multiplier_min: 0.8
+    pareto_multiplier_max: 3.2
+    download_gb: 128.0
+    preprocess_memory_exponent_a: 3.575
+    preprocess_memory_exponent_b: 0.3
+    preprocess_duration_seconds: 95
+    workhorse_cpu_stages: [400, 45, 1200, 30, 900, 40, 800, 25]
+    workhorse_soft_vcpu: [2, 4, 4, 2]
+    workhorse_hard_vcpu: [4, 16, 12, 8]
+    workhorse_io_wait_per_stage: [0.6, 0.08, 0.02, 0.3]
+    io_wait_fraction: 0.4
+    upload_gb: 16
+  - id: type2
+    label: "Haul2"
+    description: "General-purpose moderate batch workloads."
+    arrival_rate_per_hour: 5
+    burst_size_min: 4
+    burst_size_max: 10
+    pareto_alpha: 2.8
+    pareto_multiplier_min: 0.5
+    pareto_multiplier_max: 3.0
+    download_gb: 48.0
+    preprocess_memory_exponent_a: 1.275
+    preprocess_memory_exponent_b: 0.472
+    preprocess_duration_seconds: 20
+    workhorse_cpu_stages: [320, 30, 180, 25]
+    workhorse_soft_vcpu: [2, 2]
+    workhorse_hard_vcpu: [16, 4]
+    workhorse_io_wait_per_stage: [0.06, 0.35]
+    io_wait_fraction: 0.28
+    upload_gb: 0.25
+  - id: type3
+    label: "HaulThree"
+    description: >
+      Haul Three
+    arrival_rate_per_hour: 3
+    burst_size_min: 8
+    burst_size_max: 12
+    pareto_alpha: 1.8
+    pareto_multiplier_min: 0.8
+    pareto_multiplier_max: 4.0
+    download_gb: 96
+    preprocess_memory_exponent_a: 12.1
+    preprocess_memory_exponent_b: 0.1
+    preprocess_duration_seconds: 40
+    workhorse_cpu_stages: [400, 35, 800, 30, 400, 25]
+    workhorse_soft_vcpu: [2, 4, 4]
+    workhorse_hard_vcpu: [2, 8, 4]
+    workhorse_io_wait_per_stage: [0.65, 0.05, 0.25]
+    io_wait_fraction: 0.25
+    upload_gb: 64
