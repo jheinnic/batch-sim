@@ -449,7 +449,7 @@ class K8SScheduler:
                      for_job: Optional[JobSpec] = None,
                      tier_name: Optional[str] = None) -> Generator[Any, None, None]:
         node_id = str(uuid.uuid4())[:8]
-        self.metrics.node_launching(env.now, node_id, instance.name)
+        self.metrics.node_launching(env.now, node_id, instance.name, tier_name=tier_name)
         cap = self._k8s_capacity(instance, tier_name or "")
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
                          os_overhead_gb=self.cfg.os_overhead_gb)

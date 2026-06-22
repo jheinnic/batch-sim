@@ -155,8 +155,13 @@ def plot(experiment_dir, threshold):
 
 def _print_summary(sc):
     t = Table(title="Run Summary"); t.add_column("Metric"); t.add_column("Value", justify="right")
-    js = sc.job_stats; cs = sc.cost_summary
-    t.add_row("Total EC2 cost", f"${cs.total_cost_usd:.4f}")
+    js = sc.job_stats; cs = sc.cost_summary; sm = sc.storage_metrics
+    if sm is not None:
+        t.add_row("Compute cost (EC2)", f"${sm.compute_cost_usd:.4f}")
+        t.add_row("Storage cost (EBS)", f"${sm.storage_cost_usd:.4f}  ({sm.storage_pct:.1f}% of total)")
+        t.add_row("Total cost", f"${sm.total_cost_usd:.4f}")
+    else:
+        t.add_row("Total EC2 cost", f"${cs.total_cost_usd:.4f}")
     t.add_row("Jobs completed", str(js.pool_job_count))
     t.add_row("SLA breaches", str(js.pool_sla_breach_count))
     t.add_row("Crashes", str(js.pool_crash_count))

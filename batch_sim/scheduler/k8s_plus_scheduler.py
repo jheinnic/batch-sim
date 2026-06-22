@@ -796,12 +796,13 @@ class K8SPlusScheduler:
 
     def _launch_node(self, env, instance, for_job=None, tier_name=None):
         node_id = str(uuid.uuid4())[:8]
-        self.metrics.node_launching(env.now, node_id, instance.name)
         effective_tier = tier_name
         if effective_tier is None and for_job is not None:
             picked = self._pick_launch_tier(for_job) if self._tier_defs else None
             effective_tier = picked or ""
         effective_tier = effective_tier or ""
+        self.metrics.node_launching(env.now, node_id, instance.name,
+                                    tier_name=effective_tier or None)
         cap = self._k8s_capacity(instance, effective_tier)
         node = NodeModel(node_id=node_id, instance=instance, metrics=self.metrics,
                          os_overhead_gb=self.cfg.os_overhead_gb)

@@ -25,8 +25,8 @@ Output:
     results/node_timelines/<scheduler>/
         overview.png          — all nodes, one row each, compressed time axis
         overview.svg
-        node_<id>.png         — one chart per node, full-resolution
-        node_<id>.svg
+        [<tier>_]node_<id>.png — one chart per node, full-resolution; tier-prefixed
+        [<tier>_]node_<id>.svg   when the node was provisioned from a named tier
         summary.json          — structured data for all node timelines
 
 Phase colour coding (consistent with presentation):
@@ -145,6 +145,8 @@ def run_and_extract(
 
     el           = load_event_list(event_list_path)
     job_profiles = {e.job_id: e for e in el.events}
+    cfg          = load_scheduler_config(cfg_path)   # BSIM-123: scheduler type intrinsic to cfg
+    tier_defs    = {t.name: t for t in getattr(cfg, 'tiers', None) or []}
 
     if event_log_path:
         with open(event_log_path) as f:
@@ -162,9 +164,7 @@ def run_and_extract(
         print(f"  Reading {len(log)} events from saved log")
     else:
         from batch_sim.experiment_runner import run_one
-        from batch_sim.core.config_loader import load_scheduler_config
 
-        cfg      = load_scheduler_config(cfg_path)   # BSIM-123: scheduler type intrinsic to cfg
         registry = InstanceRegistry.from_yaml(registry_path)
         cool_off  = el.metadata.get('cool_off_seconds', 0.0)
 
@@ -185,6 +185,7 @@ def run_and_extract(
     node_ready_time  = {}
     node_term_time   = {}
     node_idle_dur    = {}
+    node_tier        = {}   # node_id → tier name (queue pool), absent for Batch/untiered K8S
 
     for e in log:
         nid = e.data.get('node_id')
@@ -194,6 +195,8 @@ def run_and_extract(
         if e.event_type == EventType.NODE_LAUNCHING:
             node_instances[nid]   = e.data.get('instance_name', '?')
             node_launch_time[nid] = t
+            if e.data.get('tier_name'):
+                node_tier[nid] = e.data['tier_name']
         if e.event_type == EventType.NODE_READY:
             node_ready_time[nid]  = t
         if e.event_type == EventType.NODE_TERMINATED:
@@ -263,6 +266,7 @@ def run_and_extract(
     job_centroids = {}
     job_start_t   = {}
     job_status    = {}
+    job_retries   = {}
 
     for e in log:
         nid = e.data.get('node_id')
@@ -291,6 +295,7 @@ def run_and_extract(
             job_status[(nid, jid)] = (
                 'crash' if e.event_type == EventType.JOB_CRASH else 'complete'
             )
+            job_retries[(nid, jid)] = e.data.get('retry_count', 0)
 
     # ── Assemble per-node structure ────────────────────────────────────────
     all_node_ids = set(node_launch_time.keys())
@@ -305,6 +310,35 @@ def run_and_extract(
         launch_t = node_launch_time[nid]
         term_t   = node_term_time[nid]
         cost     = (term_t - launch_t) / 3600.0 * inst.hourly_price_usd
+
+        # Per-node EBS storage cost, mirroring NodeStoragePool.storage_cost_usd
+        # (BSIM-92, single pool billed on final capacity for the full lifetime)
+        # and _PoolGeneration.cost_usd (BSIM-93, each generation billed on its
+        # own fixed capacity for its own open→close span) exactly.
+        storage_cost = 0.0
+        if cfg.storage is not None:
+            price = cfg.storage.ebs_price_per_gb_hour
+            gen_events = pool_gen_events.get(nid, [])
+            if gen_events:
+                gen_open: dict[int, tuple] = {}
+                for ev_type, t, gen_id, cap_gb in sorted(gen_events, key=lambda x: x[1]):
+                    if ev_type == 'storage_gen_opened':
+                        gen_open[gen_id] = (t, cap_gb)
+                    elif ev_type == 'storage_gen_released' and gen_id in gen_open:
+                        open_t, cap_gb = gen_open.pop(gen_id)
+                        storage_cost += cap_gb * (t - open_t) / 3600.0 * price
+                # Generations still open at node termination (force-closed for cost)
+                for open_t, cap_gb in gen_open.values():
+                    storage_cost += cap_gb * (term_t - open_t) / 3600.0 * price
+            else:
+                expanded  = pool_expanded.get(nid, [])
+                final_cap = (expanded[-1][2] if expanded
+                             else cfg.storage.initial_volume_count * cfg.storage.volume_size_gb)
+                storage_cost = final_cap * (term_t - launch_t) / 3600.0 * price
+
+        tier_name = node_tier.get(nid)
+        tier_spike_max_gb = (tier_defs[tier_name].spike_max_gb
+                              if tier_name in tier_defs else None)
 
         jobs_here = []
         for (n2, jid), windows in phase_windows.items():
@@ -348,6 +382,7 @@ def run_and_extract(
                                                     windows[0][1] if windows else 0),
                 'end_t':           windows[-1][2] if windows else 0,
                 'status':          job_status.get((nid, jid), 'complete'),
+                'retry_count':     job_retries.get((nid, jid), 0),
                 'phases':          [(ph, t0, t1) for ph, t0, t1 in windows],
                 'reserved_ram_gb': round(res_gb, 1) if res_gb else None,
                 'soft_cpu':        j_soft,
@@ -391,13 +426,17 @@ def run_and_extract(
             'launch_t':               launch_t,
             'ready_t':                node_ready_time.get(nid, launch_t),
             'term_t':                 term_t,
-            'cost':                   round(cost, 4),
+            'cost':                   round(cost, 4),           # EC2 compute only
+            'storage_cost':           round(storage_cost, 4),   # EBS only
+            'total_cost':             round(cost + storage_cost, 4),
             'jobs':                   jobs_here,
             'soft_cpu':               node_soft if node_soft > 0 else None,
             'hard_cpu':               node_hard if node_hard > 0 else None,
             'reserved_ram_gb':        round(max(
                 (j.get('reserved_ram_gb') or 0 for j in jobs_here), default=0
             ), 1),
+            'tier_name':              tier_name,           # None for Batch/untiered K8S
+            'tier_spike_max_gb':      tier_spike_max_gb,   # configured preprocess-burst reservation
             'effective_schedulable_gb': eff_sch_gb,          # None for batch
             'spike_headroom_gb':       spike_headroom_gb,   # None for batch
             'cpu_waste_steps':        sorted(             # BSIM-82
@@ -413,7 +452,9 @@ def run_and_extract(
         'event_list':  event_list_path,
         'total_nodes': len(node_timelines),
         'total_jobs':  sum(len(v['jobs']) for v in node_timelines.values()),
-        'total_cost':  round(sum(v['cost'] for v in node_timelines.values()), 4),
+        'total_compute_cost': round(sum(v['cost'] for v in node_timelines.values()), 4),
+        'total_storage_cost': round(sum(v['storage_cost'] for v in node_timelines.values()), 4),
+        'total_cost':  round(sum(v['total_cost'] for v in node_timelines.values()), 4),
         'seed':        seed,
     }
 
@@ -423,6 +464,20 @@ def run_and_extract(
 # ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
+
+def _tier_label(node: dict) -> str:
+    """'  tier:<name>  preload≤<spike>G' when the node's tier is known and
+    declared in the scheduler config passed to this run; '' otherwise (Batch,
+    untiered K8S, or a tier_name from the event log that this scheduler
+    config doesn't define — e.g. a mismatched --scheduler-config)."""
+    tier_name = node.get('tier_name')
+    spike_gb  = node.get('tier_spike_max_gb')
+    if not tier_name:
+        return ''
+    if spike_gb is None:
+        return f"  tier:{tier_name}"
+    return f"  tier:{tier_name}  preload≤{spike_gb:.0f}G"
+
 
 def _draw_node_row(
     ax, node: dict, y: float, row_h: float,
@@ -770,12 +825,9 @@ def _render_overview_page(
         y = n_nodes - 1 - i
         _draw_node_row(ax_gantt, node, y, row_h, t_min, t_scale,
                        fig_w, scheduler_type=scheduler_type)
-        soft = node.get('soft_cpu', '?')
-        hard = node.get('hard_cpu', '?')
-        ram  = node.get('reserved_ram_gb', node['ram_gb'])
-        label = (f"{nid}  {node['instance']}  ${node['cost']:.2f}"
+        label = (f"{nid}  {node['instance']}  ${node['total_cost']:.2f}"
                  f"  ({len(node['jobs'])}j)"
-                 f"  cpu:{soft}/{hard}  ram:{ram:.0f}G")
+                 f"{_tier_label(node)}")
         ax_gantt.text(-0.005, y, label,
                       transform=ax_gantt.get_yaxis_transform(),
                       ha='right', va='center', fontsize=6, fontfamily=FONT)
@@ -794,9 +846,11 @@ def _render_overview_page(
                    else 'OKD K8S+')
     ax_gantt.set_title(
         f'{sched_label} — Node Lifecycles  '
-        f'{metadata["total_jobs"]} jobs · ${metadata["total_cost"]:.2f}'
+        f'{metadata["total_jobs"]} jobs · \\${metadata["total_cost"]:.2f} '
+        f'(compute \\${metadata["total_compute_cost"]:.2f} '
+        f'+ storage \\${metadata["total_storage_cost"]:.2f})'
         f'{title_suffix}  '
-        f'(left labels: instance  cost  jobs  cpu:soft/hard  ram:limit)',
+        f'(left labels: instance  cost  jobs  tier  preload-reservation)',
         fontfamily=FONT, fontsize=9, loc='left',
     )
 
@@ -1002,8 +1056,8 @@ def chart_overview(
         title_suffix  = ''
     else:
         summary_nodes = sorted(nodes_by_launch,
-                               key=lambda x: x[1]['cost'], reverse=True)[:max_rows]
-        title_suffix  = f'  [top {max_rows} of {n_total} by cost]'
+                               key=lambda x: x[1]['total_cost'], reverse=True)[:max_rows]
+        title_suffix  = f'  [top {max_rows} of {n_total} by total cost]'
 
     _render_overview_page(
         gantt_nodes=summary_nodes, all_timelines=node_timelines,
@@ -1207,10 +1261,8 @@ def chart_per_node(
     # ── Node lifecycle row ─────────────────────────────────────────────
     _draw_node_row(ax_gantt, node, n_rows - 1, row_h,
                    t_min, t_scale, fig_w, scheduler_type=scheduler_type)
-    soft = node.get('soft_cpu', '?')
-    hard = node.get('hard_cpu', '?')
     ax_gantt.text(-0.005, n_rows - 1,
-                  f"node  {node['instance']}  cpu:{soft}/{hard}  {node_ram_gb:.0f}GB",
+                  f"node  {node['instance']}  {node_ram_gb:.0f}GB{_tier_label(node)}",
                   transform=ax_gantt.get_yaxis_transform(),
                   ha='right', va='center', fontsize=8,
                   fontfamily=FONT, fontweight='bold')
@@ -1251,12 +1303,14 @@ def chart_per_node(
                 'x', color='#e74c3c', markersize=7, mew=2, zorder=5,
             )
 
-        res_str  = f'  ram:{res_gb:.0f}G' if res_gb is not None else ''
-        job_soft = job.get('soft_cpu', '?')
-        job_hard = job.get('hard_cpu', '?')
+        res_str   = f'  ram:{res_gb:.0f}G' if res_gb is not None else ''
+        job_soft  = job.get('soft_cpu', '?')
+        job_hard  = job.get('hard_cpu', '?')
+        retries   = job.get('retry_count', 0)
+        retry_str = f'  retry:{retries}' if retries else ''
         label = (f"{job['centroid'].split('_')[-1].upper()}"
                  f"  {job['job_id'][:8]}"
-                 f"  cpu:{job_soft}/{job_hard}{res_str}")
+                 f"  cpu:{job_soft}/{job_hard}{res_str}{retry_str}")
         ax_gantt.text(-0.005, y, label,
                       transform=ax_gantt.get_yaxis_transform(),
                       ha='right', va='center', fontsize=7, fontfamily=FONT)
@@ -1267,8 +1321,10 @@ def chart_per_node(
     ax_gantt.tick_params(axis='x', labelbottom=False)
     ax_gantt.set_title(
         f'Node {node_id}  —  {node["instance"]}'
-        f'  ({node_ram_gb:.0f} GB  {node_vcpu} vCPU  ${node["hourly_usd"]:.4f}/hr)'
-        f'  lifespan {t_span:.0f}s  ·  {len(jobs)} jobs  ·  ${node["cost"]:.4f}',
+        f'  ({node_ram_gb:.0f} GB  {node_vcpu} vCPU  \\${node["hourly_usd"]:.4f}/hr)'
+        f'  lifespan {t_span:.0f}s  ·  {len(jobs)} jobs  ·  '
+        f'\\${node["total_cost"]:.4f} (compute \\${node["cost"]:.4f} '
+        f'+ storage \\${node["storage_cost"]:.4f})',
         fontfamily=FONT, fontsize=9,
     )
     ax_gantt.legend(handles=_legend_handles(), fontsize=8,
@@ -1370,8 +1426,11 @@ def chart_per_node(
     ax_bottom.tick_params(axis='x', labelbottom=True)
     ax_bottom.set_xlabel('time since node launch', fontfamily=FONT, fontsize=9)
 
+    # BSIM: prepend the tier (queue pool) short name so files for the same
+    # reservation type sort/group together in a directory listing.
+    fname_prefix = f"{node['tier_name']}_" if node.get('tier_name') else ''
     for ext in ('png', 'svg'):
-        fig.savefig(out / f'node_{node_id}.{ext}', dpi=130, bbox_inches='tight')
+        fig.savefig(out / f'{fname_prefix}node_{node_id}.{ext}', dpi=130, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -1458,7 +1517,9 @@ def main() -> None:
     )
     print(f'  {metadata["total_nodes"]} nodes  '
           f'{metadata["total_jobs"]} jobs  '
-          f'${metadata["total_cost"]:.2f} total')
+          f'${metadata["total_cost"]:.2f} total  '
+          f'(compute ${metadata["total_compute_cost"]:.2f} '
+          f'+ storage ${metadata["total_storage_cost"]:.2f})')
 
     with open(out / 'summary.json', 'w') as f:
         serial = {nid: {k: v for k, v in nd.items()} for nid, nd in node_timelines.items()}
