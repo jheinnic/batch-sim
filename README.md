@@ -54,6 +54,20 @@ python -m batch_sim plot --experiment-dir results/reference_run
 
 K8S saves ~1.1% on a moderate 4-hour window; savings grow with workload density.
 
+## Modeling Decisions & Known Limitations
+
+Before citing a number from this simulation to support a real decision, read:
+
+- [docs/CPU_MODELING.md](docs/CPU_MODELING.md) — CPU scheduling model for Batch
+  (CFS proportional shares) vs. K8S+ (hard/soft limits), with a bias-direction
+  analysis of which side each simplification favors.
+- [docs/NODE_LIFECYCLE_MODELING.md](docs/NODE_LIFECYCLE_MODELING.md) — the
+  simulation's event-driven node disruption (drain/terminate) decisions are
+  exact, where a real Karpenter-style controller's are sampled on a
+  reconciliation cadence. This is a one-directional, unquantified distortion:
+  real-world K8S+ node-hours/cost plausibly run higher than this simulation
+  predicts, never lower.
+
 ## Jira Tickets
 
 See [docs/jira/README.md](docs/jira/README.md) — 44 tickets across 9 epics.
