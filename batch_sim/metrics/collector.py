@@ -99,8 +99,12 @@ class MetricsCollector:
                         aggregate_ram_gb: float, node_ram_gb: float) -> None:
         self.record(SimEvent(EventType.BURST_COLLISION, t, {"node_id": node_id, "job_ids": job_ids,
             "victim_id": victim_id, "aggregate_ram_gb": aggregate_ram_gb, "node_ram_gb": node_ram_gb}))
-    def node_launching(self, t: float, node_id: str, instance_name: str) -> None:
-        self.record(SimEvent(EventType.NODE_LAUNCHING, t, {"node_id": node_id, "instance_name": instance_name}))
+    def node_launching(self, t: float, node_id: str, instance_name: str,
+                       tier_name: Optional[str] = None) -> None:
+        self.record(SimEvent(EventType.NODE_LAUNCHING, t, {
+            "node_id": node_id, "instance_name": instance_name,
+            **({"tier_name": tier_name} if tier_name else {}),
+        }))
     def node_ready(self, t: float, node_id: str, instance_name: str) -> None:
         self.record(SimEvent(EventType.NODE_READY, t, {"node_id": node_id, "instance_name": instance_name}))
     def node_idle(self, t: float, node_id: str) -> None:
