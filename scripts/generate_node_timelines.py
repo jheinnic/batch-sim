@@ -466,17 +466,13 @@ def run_and_extract(
 # ---------------------------------------------------------------------------
 
 def _tier_label(node: dict) -> str:
-    """'  tier:<name>  preload≤<spike>G' when the node's tier is known and
-    declared in the scheduler config passed to this run; '' otherwise (Batch,
-    untiered K8S, or a tier_name from the event log that this scheduler
-    config doesn't define — e.g. a mismatched --scheduler-config)."""
+    """'  tier:<name>' when the node's tier is known, '' otherwise (Batch,
+    untiered K8S). The tier short name already encodes its spike_max_gb by
+    convention (e.g. '4r92' = 92 GB preload reservation), so spelling out
+    tier_spike_max_gb here would just repeat what the name already says —
+    it's still in summary.json for anything that wants it programmatically."""
     tier_name = node.get('tier_name')
-    spike_gb  = node.get('tier_spike_max_gb')
-    if not tier_name:
-        return ''
-    if spike_gb is None:
-        return f"  tier:{tier_name}"
-    return f"  tier:{tier_name}  preload≤{spike_gb:.0f}G"
+    return f"  tier:{tier_name}" if tier_name else ''
 
 
 def _draw_node_row(
@@ -850,7 +846,7 @@ def _render_overview_page(
         f'(compute \\${metadata["total_compute_cost"]:.2f} '
         f'+ storage \\${metadata["total_storage_cost"]:.2f})'
         f'{title_suffix}  '
-        f'(left labels: instance  cost  jobs  tier  preload-reservation)',
+        f'(left labels: instance  cost  jobs  tier)',
         fontfamily=FONT, fontsize=9, loc='left',
     )
 
