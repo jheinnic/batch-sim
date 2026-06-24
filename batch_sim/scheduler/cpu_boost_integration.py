@@ -135,6 +135,66 @@ def run_cpu_boost_k8s(
     _emit_cpu_waste(env, node, result, metrics, scheduler_type)
 
 
+class _BatchJob:
+    """CPU state for one job under the Batch proportional-CFS model. For
+    Batch, hard_cpu is effectively unlimited (no cfs_quota), so stage thread
+    count is the only ceiling."""
+    def __init__(self, job_id, soft_cpu, stage_threads, io_wait):
+        self.job_id        = job_id
+        self.soft_cpu      = soft_cpu
+        self.stage_threads = stage_threads
+        self.io_wait       = io_wait
+        self.boost_alloc   = 0.0
+        self.effective_vcpu= 0.0
+        self.thread_waste  = 0.0
+
+
+def _distribute_proportional_cfs(jobs: list, node_physical_vcpu: float) -> None:
+    """
+    Iterative proportional (cpu.shares-weighted) allocation with per-job
+    thread-count ceilings, mutating job.boost_alloc in place.
+
+    Each round divides the capacity NOT YET allocated among jobs still under
+    their ceiling, by their soft_cpu (share) weight. A job whose cumulative
+    allocation would cross its stage_threads ceiling is capped there and
+    drops out; the capacity it didn't use is redistributed among the
+    remaining unsaturated jobs in the next round. This must accumulate each
+    round's increment onto the job's running total rather than overwrite
+    it — a job that takes more than one round to saturate (or never
+    saturates) needs every round's share added together, not just its
+    last round's share, or capacity that should reach it is silently lost.
+    """
+    for j in jobs:
+        j.boost_alloc = 0.0
+
+    remaining   = float(node_physical_vcpu)
+    unsaturated = list(jobs)
+
+    while unsaturated and remaining > 1e-6:
+        total_shares      = sum(j.soft_cpu for j in unsaturated)
+        newly_saturated   = []
+        round_distributed = 0.0
+
+        for j in unsaturated:
+            share = remaining * (j.soft_cpu / total_shares)
+            if j.boost_alloc + share >= j.stage_threads:
+                increment    = j.stage_threads - j.boost_alloc
+                j.boost_alloc = j.stage_threads
+                newly_saturated.append(j)
+            else:
+                increment      = share
+                j.boost_alloc += share
+            round_distributed += increment
+
+        remaining -= round_distributed
+        if remaining < 0:
+            remaining = 0.0
+
+        if not newly_saturated:
+            break
+        unsaturated = [j for j in unsaturated if j not in newly_saturated]
+
+
 def run_cpu_boost_batch(
     env: Any,
     node: NodeModel,
@@ -152,18 +212,6 @@ def run_cpu_boost_batch(
     if not slots:
         return
 
-    # Build job states — for Batch, hard_cpu is effectively unlimited
-    # (no cfs_quota), so we use stage thread count as the physical ceiling
-    class _BatchJob:
-        def __init__(self, job_id, soft_cpu, stage_threads, io_wait):
-            self.job_id        = job_id
-            self.soft_cpu      = soft_cpu
-            self.stage_threads = stage_threads
-            self.io_wait       = io_wait
-            self.boost_alloc   = 0.0
-            self.effective_vcpu= 0.0
-            self.thread_waste  = 0.0
-
     jobs = []
     for slot in slots:
         job     = slot.job
@@ -172,30 +220,7 @@ def run_cpu_boost_batch(
         io_w    = _get_stage_io_wait(slot)
         jobs.append(_BatchJob(job.job_id, max(1, soft), threads, io_w))
 
-    # Iterative proportional CFS solver
-    remaining   = float(node.physical_vcpu)
-    unsaturated = list(jobs)
-
-    while unsaturated and remaining > 1e-6:
-        total_shares    = sum(j.soft_cpu for j in unsaturated)
-        newly_saturated = []
-
-        for j in unsaturated:
-            alloc = remaining * (j.soft_cpu / total_shares)
-            if alloc >= j.stage_threads:
-                j.boost_alloc = j.stage_threads
-                newly_saturated.append(j)
-            else:
-                j.boost_alloc = alloc
-
-        distributed   = sum(j.boost_alloc for j in unsaturated)
-        remaining    -= distributed
-        if remaining < 0:
-            remaining = 0.0
-
-        if not newly_saturated:
-            break
-        unsaturated = [j for j in unsaturated if j not in newly_saturated]
+    _distribute_proportional_cfs(jobs, node.physical_vcpu)
 
     # Finalise unsaturated jobs at their current boost_alloc
     # (remaining surplus after all saturated == thread_count_waste)
