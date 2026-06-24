@@ -67,6 +67,21 @@ if boost_alloc[i] > stage_threads[i]:
 either all surplus is distributed or all remaining jobs are saturated.
 Maximum passes = number of jobs (O(n)).
 
+**Bug fixed (the implementation did not match this design):** each round
+must *add* its share to a job's running total, not overwrite it. The
+original code computed `alloc = remaining × (soft_cpu / total_shares)` and
+then set `boost_alloc = alloc` directly — so a job that took more than one
+round to saturate (or never saturated) lost everything it had accumulated
+in earlier rounds, replaced by only its share of that round's much smaller
+leftover pool. A node mixing two low-share, high-ceiling jobs with two
+higher-share, low-ceiling jobs (32 vCPU total; ceilings 16,16,8,8; shares
+1,1,2,2) settled at 2.67 vCPU each for the high-ceiling jobs — 10.67 vCPU
+of real, wanted capacity left completely idle — instead of the correct
+water-filling result of 8 each, fully using the node. Fixed in
+`_distribute_proportional_cfs` (`cpu_boost_integration.py`) by tracking
+each round's increment separately and adding it to the job's cumulative
+`boost_alloc`.
+
 **Final effective CPU per job:**
 ```
 effective_vcpu[i] = min(stage_threads[i], boost_alloc[i]) × (1 - io_wait[i])
@@ -95,6 +110,24 @@ The model may slightly **overstate** Batch efficiency in edge cases:
   than CFS can redistribute them (sub-millisecond effects), effective
   utilization is marginally lower than the model predicts
 - This overstatement is small and in the direction that favors the loser
+
+**Before the accumulation bug above was fixed, this section's "true
+statement" verdict did not hold.** The buggy implementation could
+*understate* Batch's effective CPU substantially on any node with more than
+one round of saturation — i.e. it modeled Batch jobs running slower, taking
+more node-hours, costing more, than the documented design (and real CFS)
+would produce. Unlike the K8S+ fix elsewhere in this document, this is
+**not** a bias-direction-safe correction: understating the *loser's*
+efficiency is not one of the combinations this document's acceptable-bias
+table covers as automatically defensible (it only addresses the loser being
+modeled as *true or overstated* relative to the winner). If Batch was being
+modeled as more expensive than reality while K8S+ was being modeled as only
+slightly less efficient than reality, any reported K8S+ cost advantage
+could have been partly or wholly an artifact of this bug, not a real
+property of either scheduler. **The reference comparison must be re-run
+after this fix before any cost-advantage figure derived from it is cited
+again** — this fix can change the margin, and is not guaranteed to leave
+the winner unchanged.
 
 **Verdict:** The Batch model is a true statement or slight overstatement of
 Batch efficiency. This is an acceptable bias direction for the loser.
@@ -232,14 +265,21 @@ changing its direction.
 
 ## Combined bias assessment
 
-| Scheduler | Model | Bias direction | Acceptable for conclusion? |
+| Scheduler | Model | Bias direction (as of this fix) | Acceptable for conclusion? |
 |---|---|---|---|
-| AWS Batch | Proportional CFS, iterative | True / slight overstatement | ✓ |
-| OKD K8S+ | Option 2 greedy, no redistribution | Understatement | ✓ |
+| AWS Batch | Proportional CFS, iterative (accumulation bug fixed) | True / slight overstatement | ✓, *pending re-run* |
+| OKD K8S+ | Option 2 greedy (thread-aware auction fixed) | Understatement | ✓ |
 
-**The combination is defensible.** K8S+ wins at its efficiency floor against
-Batch at or above its true efficiency. Any real-world measurement of K8S+
-efficiency would show a result equal to or better than the simulation predicts.
+**The combination is now defensible *in direction*, but the *magnitude* is
+unverified.** Both fixes above moved their respective model closer to its
+documented design. The K8S+ fix only ever strengthens the existing
+"understates K8S+" floor argument — safe by construction. The Batch fix is
+different: before it, Batch's modeled efficiency could be substantially
+*understated* (not just true/overstated), which is outside the bias
+combinations this document treats as automatically safe. **Any cost
+comparison number on record (including the README's reference run) predates
+one or both fixes and must be regenerated before being cited as the current
+state of the simulation.**
 
 ---
 
@@ -337,19 +377,20 @@ under Batch — further strengthening the case for the K8S+decomposition path.
    step before using the simulation to support architectural decisions.
 
 4. (Found while fixing the thread-aware auction, not investigated further)
-   Batch's own solver (`run_cpu_boost_batch`) also appears to cap
-   `boost_alloc` at `stage_threads` by construction within its iterative
-   loop — the same way K8S+'s solver now does deliberately. If that holds
-   for every input, `thread_count_waste` may be structurally ~0 for Batch
-   too, not just K8S+, which would mean this waste category — as currently
-   computed by both solvers — never actually manifests in either scheduler
-   despite being documented and charted as a real, observable category for
-   both. Not yet confirmed exhaustively, and out of scope for the K8S+ fix
-   above; worth a deliberate look before relying on `thread_count_waste`
-   readings for Batch.
+   Batch's own solver (`run_cpu_boost_batch`, even after the accumulation-bug
+   fix below) still caps `boost_alloc` at `stage_threads` by construction
+   within its iterative loop — the same property K8S+'s solver now has
+   deliberately. `thread_count_waste` may therefore be structurally ~0 for
+   Batch too, not just K8S+, which would mean this waste category — as
+   currently computed by both solvers — never actually manifests in either
+   scheduler despite being documented and charted as a real, observable
+   category for both. Not yet confirmed exhaustively; worth a deliberate
+   look before relying on `thread_count_waste` readings for either scheduler.
 
-5. The net effect of the thread-aware auction fix on the README's reference
-   run numbers (cost, mean wait, crashes) has not been re-measured. The fix
-   changes K8S+ jobs' effective CPU mid-run, which can shift completion
-   timing, panic triggers, and therefore cost — those reference figures
-   should be regenerated before being cited again.
+5. **Both CPU model fixes on record (K8S+ thread-aware auction, Batch
+   proportional-accumulation bug) predate any current cost/wait/crash
+   figures, including the README's reference run.** Regenerate the
+   reference comparison before citing any number from it. Unlike the K8S+
+   fix alone, the Batch fix is not guaranteed to be bias-direction-safe (see
+   "Bias direction for Batch" above) — re-running is not just a refresh, it
+   could change which scheduler the simulation reports as cheaper.
