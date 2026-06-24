@@ -6,10 +6,16 @@ reservation, up to their hard_cpu ceiling.
 
 Option 2 semantics (correct, not merely conservative):
   - Jobs are sorted by io_wait ascending (lowest io_wait first)
-  - Each job absorbs surplus up to its hard_cpu headroom
+  - Each job absorbs surplus up to its hard_cpu headroom, capped at what
+    its CURRENT stage can actually use (stage_threads) — a job cannot win
+    more of the shared surplus than it is presently capable of consuming,
+    regardless of its lifetime-peak hard_cpu declaration
   - Cycles returned by a job's I/O wait are NOT redistributed
-  - Any surplus remaining after all jobs are satisfied or at hard_cpu
-    is permanently wasted for the current scheduling interval
+  - Surplus a job's current stage cannot use falls through to the next
+    job in the greedy order instead of being locked into an unusable grant
+  - Any surplus remaining after every job is satisfied — at its hard_cpu
+    ceiling or at its current stage's thread ceiling — is permanently
+    wasted for the current scheduling interval
 
 Why Option 2 is physically correct, not merely pessimistic:
 
@@ -18,23 +24,35 @@ Why Option 2 is physically correct, not merely pessimistic:
   parallel stage. The kernel enforces this limit statically for the
   container's lifetime because the OS has no concept of phases.
 
-  A job that returns cycles in one stage is not relinquishing its
-  entitlement — it is in a phase where it cannot use what it is entitled
-  to. Its entitlement remains declared at the hard limit.
+  A job that returns cycles in one of its OWN stages is not relinquishing
+  its entitlement — it is in a phase where it cannot use what it is
+  entitled to, and that entitlement remains declared at the hard limit for
+  when a later stage demands it. Option 2 protects this by never handing a
+  job's unused headroom to a DIFFERENT job's boost allocation: doing so
+  would set the kernel up for starvation if the first job's next stage
+  arrives at its maximum threading capacity simultaneously with the
+  boosted job's demand, with two jobs claiming their full hard limit and
+  no headroom to honour both.
 
-  Redistributing those returned cycles to another job's boost allocation
-  would set the kernel up for CPU starvation: if the first job's next
-  stage arrives at its maximum threading capacity simultaneously with the
-  boosted job's demand, the kernel faces two jobs claiming their full
-  hard limit with no headroom to honour both. Option 2 prevents this by
-  withholding returned cycles from redistribution — exactly as the kernel
-  correctly does to guarantee the declared hard limit is always satisfiable
-  on arrival at a demanding stage.
+  That is a distinct question from how much of the shared surplus pool a
+  job can win in the first place. A job whose current stage is only
+  single-threaded cannot productively use eight vCPU of surplus just
+  because its hard_cpu declares an eight-thread ceiling for some other,
+  more parallel stage — granting it that much anyway protects nothing (it
+  has no current use for cycles it would be "returning"), it merely
+  strands capacity a different, currently-hungrier job could have used.
+  Real CFS is work-conserving in exactly this sense: an idle share is
+  reclaimed within the same period by whatever runnable thread can use it.
+  Capping each job's grant at its current stage_threads, and letting the
+  remainder fall through to the next job in the greedy order, restores
+  that property without giving up any of a job's cross-stage
+  self-preservation — a job is never penalised for what it might need
+  later, only prevented from winning more than it can use right now.
 
-  The wasted cycles are therefore not a modelling pessimism but the correct
-  accounting of capacity the kernel withholds to protect future stage demands.
-  Under this correct model, any K8S+ advantage over Batch is a lower bound
-  on the real-world gain, not an upper bound.
+  The wasted cycles after this capping are therefore not a modelling
+  pessimism but the correct accounting of capacity nothing currently
+  running can use. Under this correct model, any K8S+ advantage over
+  Batch is a lower bound on the real-world gain, not an upper bound.
 
 The solver is called at every discrete event:
   - Job placed on node
@@ -57,7 +75,9 @@ class JobCPUState:
     hard_cpu:        int      # burst ceiling (declared quota)
     io_wait:         float    # current stage io_wait fraction
     stage_threads:   int = 0  # physical thread count for current stage;
-                              # 0 = unconstrained (use hard_cpu as ceiling)
+                              # bounds how much surplus this job can win in
+                              # the greedy auction. 0 = unconstrained (caller
+                              # has no per-stage info; use hard_cpu as ceiling)
     boost_alloc:     float = 0.0   # set by solver: soft + boost grant
     effective_vcpu:  float = 0.0   # boost_alloc × (1 - io_wait)
     wasted_vcpu:     float = 0.0   # returned cycles that went nowhere
@@ -110,6 +130,15 @@ def solve_cpu_boost(
     remaining_surplus = surplus
     for job in sorted_jobs:
         headroom = job.hard_cpu - job.soft_cpu
+        # A job cannot win more of the shared surplus than its CURRENT
+        # stage can use, regardless of its lifetime-peak hard_cpu ceiling.
+        # Capping here — rather than only measuring the overshoot after
+        # the fact — lets the unused remainder fall through to the next
+        # job in the greedy order instead of being locked into a grant
+        # this job has no way to act on. stage_threads == 0 means the
+        # caller has no per-stage info; fall back to hard_cpu-only headroom.
+        if job.stage_threads > 0:
+            headroom = min(headroom, max(0.0, job.stage_threads - job.soft_cpu))
         # Cap grant so boost_alloc never exceeds the node's physical vCPU.
         # Without this, a solo job's own io_wait soft-returns inflate the
         # surplus and recycle back to the same job, producing boost_alloc > physical.
@@ -135,7 +164,9 @@ def solve_cpu_boost(
     io_ineligible_waste = sum(
         j.boost_alloc * j.io_wait for j in jobs
     )
-    # hard_limit_waste: surplus that remained after all jobs hit hard_cpu
+    # hard_limit_waste: surplus that remained after every job hit its
+    # hard_cpu ceiling, its current-stage thread ceiling, or ran the
+    # auction dry — capacity nothing currently running can use
     hard_limit_waste = remaining_surplus
 
     total_wasted = io_ineligible_waste + hard_limit_waste

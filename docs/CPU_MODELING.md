@@ -129,7 +129,10 @@ surplus = unreserved + io_returned_at_soft
 **Greedy allocation (jobs sorted by io_wait ascending — lowest first):**
 ```
 for each job in sorted order:
-    grant = min(hard_cpu - soft_cpu, surplus)
+    headroom = hard_cpu - soft_cpu
+    if stage_threads is known (current stage, not the lifetime-peak stage):
+        headroom = min(headroom, stage_threads - soft_cpu)
+    grant = min(headroom, surplus)
     job.boost_alloc = soft_cpu + grant
     surplus -= grant
     # Cycles returned by this job's io_wait are NOT added back to surplus
@@ -138,8 +141,12 @@ for each job in sorted order:
 
 **Final effective CPU per job:**
 ```
-effective_vcpu[i] = min(stage_threads[i], boost_alloc[i]) × (1 - io_wait[i])
+effective_vcpu[i] = boost_alloc[i] × (1 - io_wait[i])
 ```
+(`boost_alloc[i]` is now already bounded by `stage_threads[i]` from the
+allocation step above, so the `min(stage_threads[i], boost_alloc[i])` clamp
+this document previously specified here is no longer a separate step — it is
+enforced where the grant is decided, not after the fact.)
 
 ### Why Option 2 is correct, not merely conservative
 
@@ -161,6 +168,49 @@ Option 2 models this correctly: returned cycles are withheld from
 redistribution, exactly as the kernel withholds quota headroom to guarantee
 the declared limit is satisfiable on arrival at a demanding stage.
 
+### Fix: a job's *current* stage bounds what it can win, not its lifetime peak
+
+This is a distinct question from the one above, and was a real gap until it
+was fixed: how much of the *shared surplus pool* a job can win from other
+jobs in the first place, versus what the job is entitled to keep for its own
+future use.
+
+The greedy auction originally measured each job's headroom as
+`hard_cpu - soft_cpu` — the job's lifetime-peak thread ceiling — with no
+regard for whether its *current* stage could use that much. A job in a
+single-threaded download/preprocess/upload phase, or any workhorse stage less
+parallel than its busiest one, could still win surplus up to its peak
+hard_cpu purely by having a low io_wait at that moment, locking capacity into
+a grant it had no way to act on while a different, currently-hungrier job
+further down the auction order went underserved. The unused portion never
+returned to the pool — it simply became `thread_count_waste` charged against
+the job that won it, while a job that could have used it got less than it
+needed.
+
+This is not the same situation the hard-limit-preservation argument above
+protects: that argument is about a job's own entitlement across its *own*
+future stages. It does not justify letting a job's *current* incapacity to
+use cycles deny those cycles to a *different* job that can use them right
+now — real CFS is work-conserving in exactly that sense (an idle share is
+reclaimed within the same period by whatever runnable thread wants it). The
+fix caps each job's grant at `min(hard_cpu, stage_threads) - soft_cpu`, so a
+job can never win more than it can currently use, and the remainder falls
+through to the next job in the greedy order instead of being stranded. A
+job's cross-stage self-preservation is untouched — it is never granted less
+than its current stage can use because of this cap, only prevented from
+winning more.
+
+Practical effect: aggregate "effective vCPU" readings for a node can now be
+*lower* during windows where a low-io_wait, low-thread-ceiling job was
+previously (incorrectly) credited with capacity it could not really consume
+— because that reading was never real to begin with. The corrected reading
+matches what `engine.py`'s independent `current_vcpu = min(effective_vcpu,
+stage_cap)` clamp was already enforcing for actual job progress, so the chart
+and real throughput no longer disagree. Total real work done across the node
+should be the same or higher than before the fix, not lower, since freed
+capacity is now usable by whichever job actually wants it instead of sitting
+idle inside an over-generous grant.
+
 ### Bias direction for K8S+
 
 The model is an **understatement** of K8S+ CPU efficiency:
@@ -173,7 +223,10 @@ The model is an **understatement** of K8S+ CPU efficiency:
   simulation shows
 
 **Verdict:** The K8S+ model understates K8S+ efficiency. This is an acceptable
-bias direction for the winner.
+bias direction for the winner. The thread-aware auction fix above removes a
+previously-undocumented source of *additional*, unintended pessimism that
+was not part of this analysis — it strengthens this verdict rather than
+changing its direction.
 
 ---
 
@@ -208,11 +261,14 @@ workhorse container to run without the IO-wait ineligibility constraint.
 
 ### 2. hard_limit_waste (K8S+ only)
 
-Surplus remaining after all jobs have been boosted to their hard_cpu ceiling.
+Surplus remaining after every job has been boosted to its hard_cpu ceiling,
+its current-stage thread ceiling, or the auction ran dry — capacity nothing
+currently running can use.
 
 ```
 hard_limit_waste = remaining surplus after greedy allocation exhausts all
-                   jobs' (hard_cpu - soft_cpu) headroom
+                   jobs' min(hard_cpu - soft_cpu, stage_threads - soft_cpu)
+                   headroom
 ```
 
 **Recoverable by:** Better workload mix — fewer high-io_wait jobs on the same
@@ -229,6 +285,18 @@ thread_count_waste[i] = max(0, boost_alloc[i] - stage_threads[i]) × (1 - io_wai
 
 **Recoverable by:** Adding more threads to under-threaded stages (code change
 to the application). No scheduling policy can recover this waste.
+
+**Note (K8S+, post thread-aware-auction fix):** the K8S+ solver now caps
+`boost_alloc[i]` at `stage_threads[i]` during allocation itself (see "Fix: a
+job's current stage bounds what it can win" above), so this formula's
+`max(0, ...)` term is structurally ~0 for K8S+ going forward — the over-grant
+this category used to measure no longer happens; the capacity it used to
+count is either used productively by another job or correctly counted as
+`hard_limit_waste` instead. Flagged as an open question below: Batch's own
+solver (`run_cpu_boost_batch`) also caps `boost_alloc` at `stage_threads`
+within its iterative loop by construction, so `thread_count_waste` may be
+structurally ~0 there too, not just for K8S+ — this predates today's fix and
+was not investigated as part of it.
 
 ---
 
@@ -267,3 +335,21 @@ under Batch — further strengthening the case for the K8S+decomposition path.
    declarations match the actual IO behavior of the real workload. Measurement
    of actual io_wait per stage on the real workload is the recommended next
    step before using the simulation to support architectural decisions.
+
+4. (Found while fixing the thread-aware auction, not investigated further)
+   Batch's own solver (`run_cpu_boost_batch`) also appears to cap
+   `boost_alloc` at `stage_threads` by construction within its iterative
+   loop — the same way K8S+'s solver now does deliberately. If that holds
+   for every input, `thread_count_waste` may be structurally ~0 for Batch
+   too, not just K8S+, which would mean this waste category — as currently
+   computed by both solvers — never actually manifests in either scheduler
+   despite being documented and charted as a real, observable category for
+   both. Not yet confirmed exhaustively, and out of scope for the K8S+ fix
+   above; worth a deliberate look before relying on `thread_count_waste`
+   readings for Batch.
+
+5. The net effect of the thread-aware auction fix on the README's reference
+   run numbers (cost, mean wait, crashes) has not been re-measured. The fix
+   changes K8S+ jobs' effective CPU mid-run, which can shift completion
+   timing, panic triggers, and therefore cost — those reference figures
+   should be regenerated before being cited again.
