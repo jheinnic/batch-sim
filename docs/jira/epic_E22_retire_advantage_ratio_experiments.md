@@ -45,7 +45,7 @@ than this epic dropping it by default.
 
 ## BSIM-116 — Remove the K8S+ two-queue scheduler
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 
 **Description:**
 Delete `batch_sim/scheduler/k8s_plus_two_queue.py` (`K8SPlusTwoQueueScheduler`) and the
@@ -68,7 +68,7 @@ scheduler), and `burst_pool` remains for BSIM-122.
 
 ## BSIM-117 — Remove the hybrid OKD+Batch sweep
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 
 **Description:**
 Delete `batch_sim/experiment_hybrid.py` (`run_hybrid_sweep`) and the Run-04 block in
