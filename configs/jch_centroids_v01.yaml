@@ -29,16 +29,8 @@ centroids:
       Arrival rate halves overnight then ramps above baseline at 04:00.
       Size mix skews small overnight, shifts toward larger bins in the morning.
 
-    # Required base fields; used as fallback if bin arrays are absent and
-    # by build_phase_profile before bin overrides are applied.
     arrival_rate_per_hour: 24.0
-    pareto_alpha: 2.5
-    download_gb: 8.0
-    preprocess_memory_exponent_a: 1.5
-    preprocess_memory_exponent_b: 1.2
-    preprocess_duration_seconds: 30
     io_wait_fraction: 0.20
-    upload_gb: 2.0
 
     # Burst sizing: 1–3 same-type jobs per deploy event
     burst_size_min: 1
@@ -51,6 +43,9 @@ centroids:
 
     # E14 / BSIM-75: discrete size-bin model.
     # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    # download_gb/upload_gb/preprocess_duration_seconds/preprocess_memory_exponent_{a,b}/
+    # pareto_alpha are omitted: every bin array below fully covers what they'd
+    # otherwise feed, so CentroidConfig's validator does not require them.
     centroid_bin_weights:           [5, 3, 2]   # normalises to CDF [0.50, 0.80, 1.00]
     bin_download_gb:                [16, 24, 32]
     bin_upload_gb:                  [16, 24, 32]
@@ -112,15 +107,8 @@ centroids:
       (64 GB and 128 GB preload limit).  Arrival rate is constant throughout
       the simulation; size mix is 60% medium / 40% large.
 
-    # Required base fields
     arrival_rate_per_hour: 1.5
-    pareto_alpha: 2.0
-    download_gb: 30.0
-    preprocess_memory_exponent_a: 1.0
-    preprocess_memory_exponent_b: 1.0
-    preprocess_duration_seconds: 45
     io_wait_fraction: 0.20
-    upload_gb: 4.0
 
     # Burst sizing: 2–5 jobs per deploy event
     burst_size_min: 1
@@ -129,7 +117,8 @@ centroids:
     # E14 / BSIM-74: exact memoryless Poisson (default; shown explicitly for clarity)
     arrival_spacing: poisson
 
-    # E14 / BSIM-75: discrete size-bin model
+    # E14 / BSIM-75: discrete size-bin model. Pareto-path fallback fields
+    # omitted -- every bin array below fully covers what they'd otherwise feed.
     centroid_bin_weights:           [3, 2]     # normalises to CDF [0.60, 1.00]
     bin_download_gb:                [28, 42]
     bin_upload_gb:                  [6, 10]
@@ -184,16 +173,8 @@ centroids:
       Arrival rate halves overnight then ramps above baseline at 04:00.
       Size mix skews small overnight, shifts toward larger bins in the morning.
 
-    # Required base fields; used as fallback if bin arrays are absent and
-    # by build_phase_profile before bin overrides are applied.
     arrival_rate_per_hour: 24.0
-    pareto_alpha: 2.5
-    download_gb: 8.0
-    preprocess_memory_exponent_a: 1.5
-    preprocess_memory_exponent_b: 1.2
-    preprocess_duration_seconds: 30
     io_wait_fraction: 0.20
-    upload_gb: 2.0
 
     # Burst sizing: 1–3 same-type jobs per deploy event
     burst_size_min: 1
@@ -204,8 +185,8 @@ centroids:
     # realistic burst clustering.
     arrival_spacing: poisson
 
-    # E14 / BSIM-75: discrete size-bin model.
-    # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    # E14 / BSIM-75: discrete size-bin model. Pareto-path fallback fields
+    # omitted -- every bin array below fully covers what they'd otherwise feed.
     centroid_bin_weights:           [5, 3]   # normalises to CDF [0.50, 0.80, 1.00]
     bin_download_gb:                [64, 64]
     bin_upload_gb:                  [32, 48]
@@ -260,16 +241,8 @@ centroids:
       Arrival rate halves overnight then ramps above baseline at 04:00.
       Size mix skews small overnight, shifts toward larger bins in the morning.
 
-    # Required base fields; used as fallback if bin arrays are absent and
-    # by build_phase_profile before bin overrides are applied.
     arrival_rate_per_hour: 40.0
-    pareto_alpha: 2.5
-    download_gb: 8.0
-    preprocess_memory_exponent_a: 1.5
-    preprocess_memory_exponent_b: 1.2
-    preprocess_duration_seconds: 30
     io_wait_fraction: 0.20
-    upload_gb: 2.0
 
     # Burst sizing: 1–3 same-type jobs per deploy event
     burst_size_min: 1
@@ -280,8 +253,8 @@ centroids:
     # realistic burst clustering.
     arrival_spacing: poisson
 
-    # E14 / BSIM-75: discrete size-bin model.
-    # centroid_bin_weights present → sampler uses bin path, not Pareto path.
+    # E14 / BSIM-75: discrete size-bin model. Pareto-path fallback fields
+    # omitted -- every bin array below fully covers what they'd otherwise feed.
     centroid_bin_weights:           [2, 3, 5, 3, 1]   # normalises to CDF [0.50, 0.80, 1.00]
     bin_download_gb:                [8, 8, 64, 512, 512]
     bin_upload_gb:                  [8, 512, 64, 8, 512]

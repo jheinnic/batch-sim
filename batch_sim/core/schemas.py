@@ -82,11 +82,38 @@ class CentroidConfig(BaseModel):
     label: str
     description: str = ""
     arrival_rate_per_hour: PositiveFloat
-    pareto_alpha: PositiveFloat
-    download_gb: PositiveFloat
-    preprocess_memory_exponent_a: PositiveFloat
-    preprocess_memory_exponent_b: PositiveFloat
-    preprocess_duration_seconds: PositiveFloat = Field(..., le=120.0)
+    pareto_alpha: PositiveFloat | None = Field(
+        default=None,
+        description=(
+            "Required only in Pareto mode (centroid_bin_weights absent). Drives "
+            "the multiplier sample_job() applies to download_gb/upload_gb/"
+            "preprocess_duration_seconds/preprocess_memory_exponent_a; unused in "
+            "bin mode, where bin_* arrays replace the Pareto draw entirely."
+        ),
+    )
+    download_gb: PositiveFloat | None = Field(
+        default=None,
+        description=(
+            "Required unless bin_download_gb is set (bin mode then reads the "
+            "per-bin value and never falls back to this one)."
+        ),
+    )
+    preprocess_memory_exponent_a: PositiveFloat | None = Field(
+        default=None,
+        description=(
+            "Required unless bin_preloader_hard_limit_gb is set — in bin mode "
+            "with that array present, the bin's hard limit overwrites the RAM "
+            "value this would otherwise derive."
+        ),
+    )
+    preprocess_memory_exponent_b: PositiveFloat | None = Field(
+        default=None,
+        description="Same conditional requirement as preprocess_memory_exponent_a.",
+    )
+    preprocess_duration_seconds: PositiveFloat | None = Field(
+        default=None, le=120.0,
+        description="Required unless bin_preprocess_duration_s is set.",
+    )
     workhorse_cpu_stages: list[PositiveFloat] = Field(..., min_length=2)
     io_wait_fraction: Fraction
     workhorse_soft_vcpu: list[int] | None = Field(
@@ -141,7 +168,10 @@ class CentroidConfig(BaseModel):
             "If absent, io_wait_fraction is applied uniformly to all parallel stages."
         )
     )
-    upload_gb: PositiveFloat
+    upload_gb: PositiveFloat | None = Field(
+        default=None,
+        description="Required unless bin_upload_gb is set (same pattern as download_gb).",
+    )
 
     # BSIM-74: inter-arrival draw strategy
     arrival_spacing: Literal["poisson", "approximate"] = Field(
@@ -220,6 +250,39 @@ class CentroidConfig(BaseModel):
                     "Windows must be non-overlapping. Gaps between windows inherit the "
                     "centroid baseline.",
     )
+
+    @model_validator(mode="after")
+    def _validate_pareto_fallback_fields(self) -> "CentroidConfig":
+        """BSIM-75 follow-up: pareto_alpha/download_gb/upload_gb/
+        preprocess_duration_seconds/preprocess_memory_exponent_{a,b} are only
+        required where sample_job() actually reads them — the Pareto-path
+        scalar, or the no-bin-array fallback for that one field. A config that
+        fully specifies bins for everything they'd otherwise feed need not
+        carry them at all."""
+        missing = []
+        if self.pareto_alpha is None and self.centroid_bin_weights is None:
+            missing.append("pareto_alpha (required when centroid_bin_weights is absent)")
+        if self.download_gb is None and self.bin_download_gb is None:
+            missing.append("download_gb (required unless bin_download_gb is set)")
+        if self.upload_gb is None and self.bin_upload_gb is None:
+            missing.append("upload_gb (required unless bin_upload_gb is set)")
+        if self.preprocess_duration_seconds is None and self.bin_preprocess_duration_s is None:
+            missing.append(
+                "preprocess_duration_seconds (required unless bin_preprocess_duration_s is set)"
+            )
+        if self.preprocess_memory_exponent_a is None and self.bin_preloader_hard_limit_gb is None:
+            missing.append(
+                "preprocess_memory_exponent_a (required unless bin_preloader_hard_limit_gb is set)"
+            )
+        if self.preprocess_memory_exponent_b is None and self.bin_preloader_hard_limit_gb is None:
+            missing.append(
+                "preprocess_memory_exponent_b (required unless bin_preloader_hard_limit_gb is set)"
+            )
+        if missing:
+            raise ValueError(
+                f"centroid '{self.id}': missing required field(s):\n  - " + "\n  - ".join(missing)
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_stage_arrays(self) -> "CentroidConfig":
