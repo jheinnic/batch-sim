@@ -24,6 +24,7 @@ class EventType(str, Enum):
     COST_SAMPLE              = "cost_sample"
     CPU_WASTE                = "cpu_waste"              # BSIM-71: wasted vCPU-seconds per node
     POLICY_SWAP              = "policy_swap"            # BSIM-84: time-window boundary crossed
+    STORAGE_POOL_OPENED      = "storage_pool_opened"    # BSIM-92: Batch pool's initial capacity
     STORAGE_POOL_EXPANDED    = "storage_pool_expanded"  # BSIM-92: pool grew by one volume
     STORAGE_EXHAUSTED        = "storage_exhausted"      # BSIM-92: volume ceiling reached
     STORAGE_GEN_OPENED       = "storage_gen_opened"     # BSIM-93: new K8S pool generation
@@ -117,6 +118,11 @@ class MetricsCollector:
         self.record(SimEvent(EventType.POLICY_SWAP, t, {
             "old_window_start_s": old_start_s,
             "new_window_start_s": new_start_s,
+        }))
+
+    def storage_pool_opened(self, t: float, node_id: str, capacity_gb: float) -> None:
+        self.record(SimEvent(EventType.STORAGE_POOL_OPENED, t, {
+            "node_id": node_id, "capacity_gb": capacity_gb,
         }))
 
     def storage_pool_expanded(self, t: float, node_id: str, old_gb: float,
