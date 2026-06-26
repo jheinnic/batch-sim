@@ -15,7 +15,6 @@ class EventType(str, Enum):
     JOB_COMPLETE     = "job_complete"
     JOB_CRASH        = "job_crash"
     JOB_TERMINAL     = "job_terminal_failure"
-    PANIC_TRIGGER    = "panic_trigger"
     BURST_COLLISION  = "burst_collision"
     NODE_LAUNCHING   = "node_launching"
     NODE_READY       = "node_ready"
@@ -93,8 +92,6 @@ class MetricsCollector:
             "node_id": node_id, "retry_count": retry_count, "reason": reason}))
     def job_terminal(self, t: float, job_id: str, centroid_id: str) -> None:
         self.record(SimEvent(EventType.JOB_TERMINAL, t, {"job_id": job_id, "centroid_id": centroid_id}))
-    def panic_trigger(self, t: float, job_id: str, wait_s: float) -> None:
-        self.record(SimEvent(EventType.PANIC_TRIGGER, t, {"job_id": job_id, "wait_s": wait_s}))
     def burst_collision(self, t: float, node_id: str, job_ids: list[str], victim_id: str,
                         aggregate_ram_gb: float, node_ram_gb: float) -> None:
         self.record(SimEvent(EventType.BURST_COLLISION, t, {"node_id": node_id, "job_ids": job_ids,

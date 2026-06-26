@@ -43,7 +43,7 @@ def _sim_config(centroid):
 
 def _k8s_cfg(tiers):
     return K8SConfig(
-        panic_threshold_seconds=300.0, sla_target_seconds=600.0,
+        sla_target_seconds=600.0,
         warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
         max_retries=3, replay_delay_seconds=2.0, os_overhead_gb=2.0,
         tiers=tiers)
@@ -121,7 +121,7 @@ class TestNoOp:
     def test_noop_for_batch_config(self, tier_registry):
         centroid = _centroid(compatible_tiers=["ghost", "ghost"])
         cfg = BatchConfig(
-            panic_threshold_seconds=300.0, sla_target_seconds=600.0,
+            sla_target_seconds=600.0,
             warmup_delay_seconds=5.0, idle_timeout_seconds=30.0,
             max_retries=3, replay_delay_seconds=2.0)
         with warnings.catch_warnings():

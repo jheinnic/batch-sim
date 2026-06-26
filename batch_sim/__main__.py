@@ -116,7 +116,7 @@ def compare(batch, k8s):
 @click.option("--thresholds", default="60,180,300,600,900,1800,3600", show_default=True)
 @click.option("--seed", default=42, show_default=True, type=int)
 def experiment(events, scheduler_config, registry, output, thresholds, seed):
-    """Full panic-threshold sweep across both schedulers."""
+    """Parameter sweep across both schedulers (retired pending E23 orchestration)."""
     from batch_sim.core.config_loader import load_scheduler_config
     from batch_sim.registry.instance_registry import InstanceRegistry
     from batch_sim.experiment_runner import run_experiment, build_pareto_frontier, detect_meta_effect
@@ -124,7 +124,7 @@ def experiment(events, scheduler_config, registry, output, thresholds, seed):
     threshold_vals = [float(t.strip()) for t in thresholds.split(",")]
     cfg = load_scheduler_config(scheduler_config)
     reg = InstanceRegistry.from_yaml(registry)
-    collated = run_experiment(event_list_path=events, panic_threshold_values=threshold_vals,
+    collated = run_experiment(event_list_path=events, threshold_values=threshold_vals,
                               base_cfg=cfg, registry=reg, output_dir=output, seed=seed)
     frontiers = {s: build_pareto_frontier(collated, s) for s in ("batch", "k8s")}
     with open(Path(output)/"pareto_frontiers.json","w") as f: json.dump(frontiers, f, indent=2)
@@ -148,7 +148,7 @@ def plot(experiment_dir, threshold):
     exp = Path(experiment_dir)
     with open(exp/"collated.json") as f: collated = json.load(f)
     if threshold is None:
-        threshold = sorted(set(r["panic_threshold_s"] for r in collated))[len(collated)//4]
+        threshold = sorted(set(r["threshold_s"] for r in collated))[len(collated)//4]
     _load = lambda s: json.load(open(exp/s/f"threshold_{int(threshold)}"/"scorecard.json"))
     generate_all_charts(collated, _load("batch"), _load("k8s"), exp)
     console.print(f"[green]✓ Charts → {exp}/plots/[/green]")
@@ -165,7 +165,6 @@ def _print_summary(sc):
     t.add_row("Jobs completed", str(js.pool_job_count))
     t.add_row("SLA breaches", str(js.pool_sla_breach_count))
     t.add_row("Crashes", str(js.pool_crash_count))
-    t.add_row("Panic triggers", str(js.pool_panic_trigger_count))
     t.add_row("Mean wait", f"{(js.pool_queue_wait_s or {}).get('mean', 0) or 0:.1f}s")
     console.print(t)
 

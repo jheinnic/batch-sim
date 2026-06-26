@@ -2,17 +2,11 @@
 from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field
-from enum import IntEnum
 from typing import Any, Generator, Iterator, Optional
 import simpy
 from batch_sim.generator.job_spec import JobSpec
 from batch_sim.metrics.collector import MetricsCollector, PhaseID, NodeState as NodeStateEnum
 from batch_sim.core.schemas import InstanceTypeConfig
-
-
-class Priority(IntEnum):
-    URGENT = 0
-    NORMAL = 1
 
 
 @dataclass
@@ -93,7 +87,6 @@ class OverloadHandler:
 
 @dataclass(order=True)
 class QueueEntry:
-    priority: int
     arrival_time: float
     seq: int
     job: JobSpec = field(compare=False)
@@ -103,9 +96,9 @@ class QueueEntry:
 class JobQueue:
     def __init__(self) -> None: self._heap: list[QueueEntry] = []; self._seq = 0
 
-    def enqueue(self, job: JobSpec, arrival_time: float, priority: Priority = Priority.NORMAL, enqueue_time: float = 0.0) -> None:
-        entry = QueueEntry(priority=priority.value, arrival_time=arrival_time,
-                           seq=self._seq, job=job, enqueue_time=enqueue_time)
+    def enqueue(self, job: JobSpec, arrival_time: float, enqueue_time: float = 0.0) -> None:
+        entry = QueueEntry(arrival_time=arrival_time, seq=self._seq,
+                           job=job, enqueue_time=enqueue_time)
         self._seq += 1
         heapq.heappush(self._heap, entry)
 
@@ -113,15 +106,6 @@ class JobQueue:
     def pop(self) -> QueueEntry: return heapq.heappop(self._heap)
     def __len__(self) -> int: return len(self._heap)
     def __iter__(self) -> Iterator[QueueEntry]: return iter(self._heap)
-
-    def elevate_to_urgent(self, job_id: str) -> bool:
-        for i, entry in enumerate(self._heap):
-            if entry.job.job_id == job_id:
-                new = QueueEntry(priority=Priority.URGENT.value, arrival_time=entry.arrival_time,
-                                 seq=entry.seq, job=entry.job, enqueue_time=entry.enqueue_time)
-                self._heap.pop(i); heapq.heapify(self._heap); heapq.heappush(self._heap, new)
-                return True
-        return False
 
 
 def run_job_process(

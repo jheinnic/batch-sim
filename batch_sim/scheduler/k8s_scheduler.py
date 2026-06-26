@@ -26,7 +26,7 @@ from __future__ import annotations
 import uuid, random
 from typing import Any, Generator, Optional
 import simpy
-from batch_sim.core.engine import NodeModel, JobQueue, Priority, QueueEntry, OverloadHandler, run_job_process
+from batch_sim.core.engine import NodeModel, JobQueue, QueueEntry, OverloadHandler, run_job_process
 from batch_sim.core.schemas import (
     SchedulerConfig, DrainRule, QueuePolicy, TimeWindowPolicy, TierProfile,
 )
@@ -57,7 +57,6 @@ class K8SScheduler:
         self._overload_handler = OverloadHandler(
             metrics=self.metrics, scheduler_cfg=self.cfg,
             replay_queue=self._queue, rng=self.rng)
-        self._panic_monitors: dict[str, simpy.Process] = {}
 
         # BSIM-84/85: time-window policy state
         self._active_window_idx: int = 0
@@ -266,14 +265,6 @@ class K8SScheduler:
         return [t for t in tiers
                 if t in self._tier_defs and self._tier_defs[t].spike_max_gb >= min_spike]
 
-    def _pick_launch_tier(self, job: JobSpec) -> Optional[str]:
-        """Choose the least-wasteful viable tier for launching a node for this job:
-        smallest spike_max_gb that still accommodates the job's burst."""
-        viable = self._viable_tiers(job, self._job_compatible_tiers.get(job.job_id, []))
-        if not viable:
-            return None
-        return min(viable, key=lambda t: self._tier_defs[t].spike_max_gb)
-
     # -----------------------------------------------------------------------
     # Job lifecycle
     # -----------------------------------------------------------------------
@@ -299,15 +290,12 @@ class K8SScheduler:
                     "job_id": job.job_id, "centroid_id": job.centroid_id,
                     "compatible_tiers": tiers, "min_spike_gb": round(min_spike, 3),
                 }))
-                self.metrics.panic_trigger(env.now, job.job_id, 0.0)
                 return
             tiers = viable
             self._job_compatible_tiers[job.job_id] = tiers
         self.metrics.job_queued(env.now, job.job_id, job.centroid_id, "NORMAL",
                                 queue_name=(";".join(tiers) if tiers else None))
-        self._queue.enqueue(job, arrival_time=arrival_time, priority=Priority.NORMAL, enqueue_time=env.now)
-        proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
-        self._panic_monitors[job.job_id] = proc
+        self._queue.enqueue(job, arrival_time=arrival_time, enqueue_time=env.now)
         self._try_schedule(env)
 
     def on_job_complete(self, env: simpy.Environment, node: NodeModel, job: JobSpec) -> None:
@@ -340,58 +328,6 @@ class K8SScheduler:
         self._interrupt_drain_monitor(node.node_id)
         self._try_schedule(env)
 
-    def guarantee_capacity(self, env: simpy.Environment, job: JobSpec) -> None:
-        soft = job.profile.soft_limit_ram_gb
-        vcpu = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
-        job_tiers = self._job_compatible_tiers.get(job.job_id, [])
-        for node in self._nodes.values():
-            if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
-                    and node.node_id not in self._reserved
-                    and self._node_compatible(node.node_id, job_tiers)
-                    and self._k8s_fits(node, soft, vcpu)):
-                self._reserved[node.node_id] = job.job_id; return
-
-        if self._tier_defs:
-            tier = self._pick_launch_tier(job)
-            if tier is None:
-                return
-            instance = self.registry.get_by_name(self._tier_defs[tier].spawn_instance_class)
-            if instance:
-                env.process(self._launch_node(env, instance, for_job=job, tier_name=tier))
-        else:
-            instance = self._select_instance_for_job(job)
-            if instance:
-                env.process(self._launch_node(env, instance, for_job=job))
-
-    def _select_instance_for_job(self, job: JobSpec) -> Optional[InstanceTypeConfig]:
-        """
-        Legacy / no-tier instance selection.
-        Legacy time_window_policy: use the matched band's spawn_instance_class.
-        No-policy: cheapest_fitting.
-        """
-        if self.cfg.time_window_policy:
-            qp = self._route_to_queue(job.profile.preprocess_peak_ram_gb)
-            if qp is None:
-                return None
-            band_key = f"{qp.exclusive_min_gb}-{qp.inclusive_max_gb}"
-            now = getattr(self, '_env', None)
-            if now is not None:
-                now = self._env.now
-                cool_down = 60.0 / qp.spawn_rate_per_min
-                last = self._last_spawn_t.get(band_key, -cool_down)
-                if now - last < cool_down:
-                    return None
-                self._last_spawn_t[band_key] = now
-            return self.registry.get_by_name(qp.spawn_instance_class)
-        else:
-            soft_gb = job.profile.soft_limit_ram_gb
-            vcpu    = (getattr(job, "soft_cpu", 0) or job.profile.workhorse_declared_vcpu)
-            for inst in sorted(self.registry.all_types, key=lambda i: i.hourly_price_usd):
-                if inst.vcpu < vcpu:
-                    continue
-                if self._k8s_capacity(inst).effective_schedulable_gb >= soft_gb:
-                    return inst
-            return None
 
     def _try_schedule(self, env: simpy.Environment) -> None:
         """Scan full queue for placeable jobs."""
@@ -413,8 +349,6 @@ class K8SScheduler:
         job_tiers = self._job_compatible_tiers.get(job.job_id, [])
         best = self._best_fit_node(soft, vcpu, job.job_id, job_tiers)
         if best is None: return False
-        mon = self._panic_monitors.pop(job.job_id, None)
-        if mon and mon.is_alive: mon.interrupt("placed")
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += soft; best.allocated_vcpu += vcpu
         if best.state == NodeStateEnum.IDLE: best.state = NodeStateEnum.READY
@@ -717,13 +651,6 @@ class K8SScheduler:
                     best_score = score
                     best_inst = inst
         return best_inst
-
-    def _panic_monitor(self, env: simpy.Environment, job: JobSpec, enqueue_time: float) -> Generator[Any, None, None]:
-        try: yield env.timeout(self.cfg.panic_threshold_seconds)
-        except simpy.Interrupt: return
-        self.metrics.panic_trigger(env.now, job.job_id, env.now - enqueue_time)
-        self._queue.elevate_to_urgent(job.job_id)
-        self.guarantee_capacity(env, job)
 
     def _idle_timer(self, env: simpy.Environment, node: NodeModel) -> Generator[Any, None, None]:
         idle_start = env.now

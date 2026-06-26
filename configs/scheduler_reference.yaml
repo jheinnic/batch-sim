@@ -1,5 +1,4 @@
 scheduler_type: k8s
-panic_threshold_seconds: 640
 sla_target_seconds: 6000
 warmup_delay_seconds: 30
 idle_timeout_seconds: 120

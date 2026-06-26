@@ -691,7 +691,6 @@ class BaseSchedulerConfig(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    panic_threshold_seconds: PositiveFloat = 300.0
     sla_target_seconds: PositiveFloat = 600.0
     warmup_delay_seconds: PositiveFloat = 90.0
     idle_timeout_seconds: PositiveFloat = 300.0
@@ -850,12 +849,3 @@ SchedulerConfig = Annotated[
     BatchConfig | K8SConfig | K8SPlusConfig,
     Field(discriminator="scheduler_type"),
 ]
-
-
-class ExperimentConfig(BaseModel):
-    event_list_path: str
-    instance_registry_path: str = "configs/instance_registry.yaml"
-    output_dir: str
-    panic_threshold_values: list[PositiveFloat] = Field(..., min_length=2)
-    base_scheduler_config: SchedulerConfig
-    schedulers: list[SchedulerType] = [SchedulerType.BATCH, SchedulerType.K8S]

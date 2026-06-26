@@ -57,7 +57,6 @@ def event_list_path(tmp_path):
 def k8s_cfg_path(tmp_path):
     cfg = {
         "scheduler_type": "k8s",
-        "panic_threshold_seconds": 300,
         "sla_target_seconds": 600,
         "warmup_delay_seconds": 5,
         "idle_timeout_seconds": 30,

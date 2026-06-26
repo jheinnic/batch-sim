@@ -29,7 +29,7 @@ from typing import Optional
 import simpy
 
 from batch_sim.core.engine import (
-    NodeModel, JobQueue, Priority, OverloadHandler, run_job_process
+    NodeModel, JobQueue, OverloadHandler, run_job_process
 )
 from batch_sim.core.schemas import SchedulerConfig, TierProfile, QueuePolicy
 from batch_sim.generator.job_spec import JobSpec, PhaseProfile
@@ -150,7 +150,7 @@ def run_job_process_plus(
 class K8SPlusScheduler:
     """
     K8S scheduler with per-node semaphore gating Phase 2.
-    Inherits all packing and panic logic from the K8S strategy;
+    Inherits all packing logic from the K8S strategy;
     overrides the job runner to use the semaphore-aware process.
     """
 
@@ -171,7 +171,6 @@ class K8SPlusScheduler:
         self._reserved: dict[str, str] = {}
         # Cache keyed by (instance_name, queue_name_or_empty_string)
         self._capacity_cache: dict[tuple[str, str], K8SCapacityProfile] = {}
-        self._panic_monitors = {}
         self._env = None
         self._draining: set = set()
 
@@ -667,16 +666,12 @@ class K8SPlusScheduler:
                     "job_id": job.job_id, "centroid_id": job.centroid_id,
                     "compatible_tiers": tiers, "min_spike_gb": round(min_spike, 3),
                 }))
-                self.metrics.panic_trigger(env.now, job.job_id, 0.0)
                 return
             tiers = viable
             self._job_compatible_tiers[job.job_id] = tiers
         self.metrics.job_queued(env.now, job.job_id, job.centroid_id, "NORMAL",
                                 queue_name=(";".join(tiers) if tiers else None))
-        self._queue.enqueue(job, arrival_time=arrival_time,
-                            priority=Priority.NORMAL, enqueue_time=env.now)
-        proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
-        self._panic_monitors[job.job_id] = proc
+        self._queue.enqueue(job, arrival_time=arrival_time, enqueue_time=env.now)
         self._try_schedule(env)
 
     def on_job_complete(self, env, node, job):
@@ -706,27 +701,6 @@ class K8SPlusScheduler:
                 env.process(self._idle_timer_fallback(env, node))
         self._try_schedule(env)
 
-    def guarantee_capacity(self, env, job):
-        soft = job.profile.soft_limit_ram_gb
-        vcpu = job.soft_cpu or job.profile.workhorse_declared_vcpu
-        job_tiers = self._job_compatible_tiers.get(job.job_id, [])
-        for node in self._nodes.values():
-            if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
-                    and node.node_id not in self._reserved
-                    and node.node_id not in self._draining
-                    and self._node_compatible(node.node_id, job_tiers)
-                    and self._k8s_fits(node, soft, vcpu)):
-                self._reserved[node.node_id] = job.job_id
-                return
-        tier = self._pick_launch_tier(job) if self._tier_defs else ""
-        if self._tier_defs and tier is None:
-            return
-        instance = self._cheapest_fitting_for_job(
-            job.profile.peak_ram_gb, soft, vcpu, now=env.now, tier_name=tier or "")
-        if instance:
-            env.process(self._launch_node(env, instance, for_job=job,
-                                          tier_name=tier or None))
-
     def _try_schedule(self, env):
         import heapq
         changed = True
@@ -749,9 +723,6 @@ class K8SPlusScheduler:
         best = self._best_fit_node(soft, vcpu, job.job_id, job_tiers)
         if best is None:
             return False
-        mon = self._panic_monitors.pop(job.job_id, None)
-        if mon and mon.is_alive:
-            mon.interrupt("placed")
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += soft
         best.allocated_vcpu += vcpu
@@ -1063,15 +1034,6 @@ class K8SPlusScheduler:
                     env.process(self._launch_node(env, instance))
                     virtual.append([cap.effective_schedulable_gb - soft,
                                     instance.vcpu - vcpu])
-
-    def _panic_monitor(self, env, job, enqueue_time):
-        try:
-            yield env.timeout(self.cfg.panic_threshold_seconds)
-        except simpy.Interrupt:
-            return
-        self.metrics.panic_trigger(env.now, job.job_id, env.now - enqueue_time)
-        self._queue.elevate_to_urgent(job.job_id)
-        self.guarantee_capacity(env, job)
 
     def _idle_timer_fallback(self, env, node):
         """Simple flat idle timer used only when no time_window_policy is configured."""
