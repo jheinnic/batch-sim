@@ -72,7 +72,7 @@ class TestK8SPlusBurstPoolWiring:
             InstanceTypeConfig(name="r7i.2xlarge", family=InstanceFamily.MEMORY,
                                ram_gb=64, vcpu=8, hourly_price_usd=0.5)]))
         cfg = K8SPlusConfig(os_overhead_gb=0.0,
-            warmup_delay_seconds=1.0, panic_threshold_seconds=300.0,
+            warmup_delay_seconds=1.0,
             tiers=[TierProfile(name="t16", spike_max_gb=16.0, spawn_instance_class="r7i.2xlarge")])
         env = simpy.Environment()
         sched = K8SPlusScheduler(cfg=cfg, registry=reg, metrics=MetricsCollector(),

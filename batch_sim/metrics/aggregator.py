@@ -40,14 +40,12 @@ class JobStatsReport:
     pool_crash_count: int = 0
     pool_terminal_failure_count: int = 0
     pool_job_count: int = 0
-    pool_panic_trigger_count: int = 0
 
 
 def compute_job_stats(collector, sla_target_seconds):
     complete = collector.events_of_type(EventType.JOB_COMPLETE)
     crashes = collector.events_of_type(EventType.JOB_CRASH)
     terminals = collector.events_of_type(EventType.JOB_TERMINAL)
-    panics = collector.events_of_type(EventType.PANIC_TRIGGER)
     cw, ce, cr, cb, cc, ct, cn = {}, {}, {}, {}, {}, {}, {}
     for e in complete:
         cid = e.data["centroid_id"]
@@ -72,7 +70,7 @@ def compute_job_stats(collector, sla_target_seconds):
         pool_retry_count=_stats([float(e.data["retry_count"]) for e in complete]),
         pool_sla_breach_count=sum(1 for w in all_waits if w > sla_target_seconds),
         pool_crash_count=len(crashes), pool_terminal_failure_count=len(terminals),
-        pool_job_count=len(complete), pool_panic_trigger_count=len(panics))
+        pool_job_count=len(complete))
 
 
 @dataclass
@@ -158,7 +156,6 @@ def compute_storage_metrics(
 @dataclass
 class Scorecard:
     scheduler_type: str
-    panic_threshold_s: float
     event_list_path: str
     job_stats: JobStatsReport
     cost_summary: PoolCostSummary
@@ -169,7 +166,6 @@ class Scorecard:
     def save(self, path):
         path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"scheduler_type": self.scheduler_type,
-            "panic_threshold_s": self.panic_threshold_s,
             "event_list_path": self.event_list_path,
             "job_stats": asdict(self.job_stats),
             "cost_summary": {"total_cost_usd": self.cost_summary.total_cost_usd,
@@ -182,14 +178,14 @@ class Scorecard:
         with open(path, "w") as f: json.dump(payload, f, indent=2)
 
 
-def build_scorecard(scheduler_type, panic_threshold_s, event_list_path,
+def build_scorecard(scheduler_type, event_list_path,
                     collector, accruers, sla_target_seconds, sim_horizon,
                     k8s_capacity_report=None, storage_pools=None):
     pool_summary = PoolCostSummary.from_accruers(accruers, sim_horizon=sim_horizon)
     sm = None
     if storage_pools is not None:
         sm = compute_storage_metrics(pool_summary.total_cost_usd, collector, storage_pools)
-    return Scorecard(scheduler_type=scheduler_type, panic_threshold_s=panic_threshold_s,
+    return Scorecard(scheduler_type=scheduler_type,
         event_list_path=event_list_path,
         job_stats=compute_job_stats(collector, sla_target_seconds),
         cost_summary=pool_summary,
@@ -211,7 +207,6 @@ def compare_scorecards(batch_path, k8s_path):
         "pool_job_count": delta(batch["job_stats"], k8s["job_stats"], "pool_job_count"),
         "pool_sla_breach_count": delta(batch["job_stats"], k8s["job_stats"], "pool_sla_breach_count"),
         "pool_crash_count": delta(batch["job_stats"], k8s["job_stats"], "pool_crash_count"),
-        "pool_panic_trigger_count": delta(batch["job_stats"], k8s["job_stats"], "pool_panic_trigger_count"),
         "pool_mean_wait_s": {"batch": (batch["job_stats"]["pool_queue_wait_s"] or {}).get("mean"),
                              "k8s": (k8s["job_stats"]["pool_queue_wait_s"] or {}).get("mean")},
         "idle_total_s": delta(batch["idle_decomposition"], k8s["idle_decomposition"], "total_idle_s"),

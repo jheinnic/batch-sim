@@ -8,7 +8,7 @@ returns the concrete subclass for a given YAML file — its type *is* the schedu
 longer carry a field its scheduler doesn't read.
 
 ```
-BaseSchedulerConfig            # cross-cutting: panic/SLA/warmup/retry timings,
+BaseSchedulerConfig            # cross-cutting: SLA/warmup/retry timings,
 │                               # scale-out polling, storage cost model
 ├── BatchConfig                # + allowed_instance_types (BSIM-115)
 └── K8SConfig                  # + os_overhead_gb, time_window_policy, tiers

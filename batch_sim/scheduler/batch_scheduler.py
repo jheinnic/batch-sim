@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid, random
 from typing import Optional
 import simpy
-from batch_sim.core.engine import NodeModel, JobQueue, Priority, QueueEntry, OverloadHandler, run_job_process
+from batch_sim.core.engine import NodeModel, JobQueue, QueueEntry, OverloadHandler, run_job_process
 from batch_sim.core.schemas import SchedulerConfig
 from batch_sim.generator.job_spec import JobSpec
 from batch_sim.metrics.collector import MetricsCollector, NodeState as NodeStateEnum
@@ -17,7 +17,7 @@ class BatchScheduler:
         self.rng = rng or random.Random(42); self.os_overhead_gb = os_overhead_gb
         self._queue = JobQueue(); self._nodes = {}; self._accruers = {}
         self._storage_pools: dict[str, NodeStoragePool] = {}
-        self._reserved = {}; self._overload_handler = None; self._panic_monitors = {}
+        self._reserved = {}; self._overload_handler = None
 
     def _setup(self, env):
         self._env = env
@@ -29,9 +29,7 @@ class BatchScheduler:
     def on_job_arrival(self, env, job, arrival_time):
         if not hasattr(self, "_env"): self._setup(env)
         self.metrics.job_queued(env.now, job.job_id, job.centroid_id, "NORMAL")
-        self._queue.enqueue(job, arrival_time=arrival_time, priority=Priority.NORMAL, enqueue_time=env.now)
-        proc = env.process(self._panic_monitor(env, job, enqueue_time=env.now))
-        self._panic_monitors[job.job_id] = proc
+        self._queue.enqueue(job, arrival_time=arrival_time, enqueue_time=env.now)
         self._try_schedule(env)
 
     def on_job_complete(self, env, node, job):
@@ -47,16 +45,6 @@ class BatchScheduler:
             self.metrics.node_idle(env.now, node.node_id)
             env.process(self._idle_timer(env, node))
         self._try_schedule(env)
-
-    def guarantee_capacity(self, env, job):
-        p = job.profile
-        for node in self._nodes.values():
-            if (node.state in (NodeStateEnum.READY, NodeStateEnum.LAUNCHING)
-                    and node.node_id not in self._reserved
-                    and self._batch_fits(node, p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))):
-                self._reserved[node.node_id] = job.job_id; return
-        instance = self._cheapest_fitting(p.peak_ram_gb, (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu))
-        if instance: env.process(self._launch_node(env, instance, for_job=job))
 
     def _allowed_types(self) -> list:
         """BSIM-115: scope the registry to cfg.allowed_instance_types when set."""
@@ -174,8 +162,6 @@ class BatchScheduler:
         _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
         best = self._best_fit_node(p.peak_ram_gb, _vcpu, job.job_id)
         if best is None: return False
-        mon = self._panic_monitors.pop(job.job_id, None)
-        if mon and mon.is_alive: mon.interrupt("placed")
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += _vcpu
         if best.state == NodeStateEnum.IDLE: best.state = NodeStateEnum.READY
@@ -216,13 +202,6 @@ class BatchScheduler:
         self.metrics.node_ready(env.now, node_id, instance.name)
         if for_job: self._reserved[node_id] = for_job.job_id
         self._try_schedule(env)
-
-    def _panic_monitor(self, env, job, enqueue_time):
-        try: yield env.timeout(self.cfg.panic_threshold_seconds)
-        except simpy.Interrupt: return
-        self.metrics.panic_trigger(env.now, job.job_id, env.now - enqueue_time)
-        self._queue.elevate_to_urgent(job.job_id)
-        self.guarantee_capacity(env, job)
 
     def _idle_timer(self, env, node):
         idle_start = env.now

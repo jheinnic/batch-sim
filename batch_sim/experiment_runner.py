@@ -101,7 +101,7 @@ def run_one(
     sim_horizon = event_list.metadata.get("horizon_seconds", 0)
     storage_pools = getattr(scheduler, "storage_pools", None)
     sc = build_scorecard(scheduler_type=scheduler_type.value,
-        panic_threshold_s=cfg.panic_threshold_seconds, event_list_path=event_list_path,
+        event_list_path=event_list_path,
         collector=metrics, accruers=scheduler.accruers,
         sla_target_seconds=cfg.sla_target_seconds, sim_horizon=sim_horizon,
         k8s_capacity_report=k8s_cap, storage_pools=storage_pools)
@@ -110,54 +110,32 @@ def run_one(
 
 def run_experiment(
     event_list_path: str | Path,
-    panic_threshold_values: list[float],
+    threshold_values: list[float],
     base_cfg: Any,
     registry: InstanceRegistry,
     output_dir: str | Path,
     schedulers: Optional[list[SchedulerType]] = None,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
-    # BSIM-109/E23: the cross-scheduler panic sweep morphed one base config across
+    # BSIM-109/E23: the cross-scheduler sweep morphed one base config across
     # scheduler types via model_copy(scheduler_type=...). That is impossible now that
     # each scheduler is a distinct discriminated-union subclass (a BatchConfig cannot
-    # become a K8SConfig). This legacy multi-scheduler sweep is superseded by E23's
-    # declarative orchestration (named workload × named scheduler grid); deferred per
-    # the E21/E23 same-deliverable cadence. The single-scheduler run_one path is
-    # unaffected.
+    # become a K8SConfig). Superseded by E23's declarative orchestration (named
+    # workload × named scheduler grid); deferred per the E21/E23 same-deliverable
+    # cadence. The single-scheduler run_one path is unaffected.
+    #
+    # The sweep axis this function used to vary was panic_threshold_seconds, which
+    # no longer exists on any scheduler config -- no real AWS Batch or Kubernetes/
+    # Karpenter autoscaler escalates job priority or forces capacity purely as a
+    # function of elapsed queue wait, so the mechanism was removed rather than
+    # repaired. There is currently no sweep axis to put in its place; reintroducing
+    # one (e.g. a real, declared queue-priority scheme) is E23-or-later scope.
     raise NotImplementedError(
         "run_experiment's cross-scheduler sweep is retired pending E23 orchestration "
-        "(BSIM-118–121). Per-scheduler configs can no longer be morphed via model_copy; "
-        "use run_one per scheduler, or the forthcoming ExperimentManifest orchestrator."
+        "(BSIM-118-121) and has no sweep axis since panic_threshold_seconds was "
+        "removed. Use run_one per scheduler, or the forthcoming ExperimentManifest "
+        "orchestrator."
     )
-    if schedulers is None: schedulers = [SchedulerType.BATCH, SchedulerType.K8S, SchedulerType.K8SPLUS]
-    output_dir = Path(output_dir); event_list = load_event_list(event_list_path)
-    collated: list[dict[str, Any]] = []
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-                  BarColumn(), TextColumn("{task.completed}/{task.total}"),
-                  TimeElapsedColumn(), console=console) as progress:
-        task = progress.add_task("Sweeping…", total=len(panic_threshold_values)*len(schedulers))
-        for threshold in sorted(panic_threshold_values):
-            for sched_type in schedulers:
-                cfg = base_cfg.model_copy(update={"panic_threshold_seconds": threshold,
-                                                    "scheduler_type": sched_type})
-                progress.update(task, description=f"[{sched_type.value.upper():5s}] {threshold:.0f}s")
-                sc = run_one(event_list=event_list, cfg=cfg,
-                             registry=registry, event_list_path=event_list_path, seed=seed)
-                assert isinstance(sc, Scorecard)
-                run_dir = output_dir / sched_type.value / f"threshold_{int(threshold)}"
-                sc.save(run_dir / "scorecard.json")
-                collated.append({"scheduler": sched_type.value, "panic_threshold_s": threshold,
-                    "total_cost_usd": sc.cost_summary.total_cost_usd,
-                    "mean_wait_s": (sc.job_stats.pool_queue_wait_s or {}).get("mean", 0) or 0,
-                    "sla_breach_count": sc.job_stats.pool_sla_breach_count,
-                    "crash_count": sc.job_stats.pool_crash_count,
-                    "panic_count": sc.job_stats.pool_panic_trigger_count,
-                    "total_idle_s": sc.idle_decomposition.total_idle_s,
-                    "post_last_job_idle_s": sc.idle_decomposition.post_last_job_s})
-                progress.advance(task)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "collated.json", "w") as f: json.dump(collated, f, indent=2)
-    return collated
 
 
 def build_pareto_frontier(collated: list[dict[str, Any]], scheduler: str) -> list[dict[str, Any]]:
