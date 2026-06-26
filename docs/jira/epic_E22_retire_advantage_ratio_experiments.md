@@ -84,4 +84,9 @@ generic panic-threshold `run_experiment`.
 - Any config/CLI inputs unique to the hybrid sweep are removed; the generic
   `run_experiment` (panic sweep) is unaffected
 - `queue_router.py` retained as analysis-only; `inspect_workload.py` still runs
+
+**Follow-up correction:** the initial pass missed `configs/experiment_jch01.yaml` and
+`configs/experiment_hybrid.yaml` — leftover `q1_instance_types`/`k_values` input configs
+for the deleted sweep, invisible to a code-reference grep since they're data files, not
+imports. Removed in a follow-up PR.
 - Full test suite green
