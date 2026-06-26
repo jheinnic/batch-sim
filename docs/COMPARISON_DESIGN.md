@@ -5,6 +5,11 @@ successor (BSIM-119's `ExperimentManifest`, BSIM-120's orchestrator) must produc
 why, before either gets built. Per the epic, this needs review/confirmation before
 BSIM-119 starts.
 
+**Revised after the panic-escalation mechanism was removed** (it had no real-world
+analog in AWS Batch or Kubernetes/Karpenter — see `docs/jira/epic_E3_core.md`'s BSIM-15
+retirement note). §1 and §4 originally treated panic-threshold sweeping as deferred
+follow-on scope; it is now simply gone, with nothing to defer.
+
 ---
 
 ## 1. The comparative claim
@@ -22,15 +27,20 @@ hardcoded to a `("batch", "k8s")` pair — that hardcoding does not survive into
 design (see §5).
 
 **Variables that must be swept:** scheduler (batch/k8s/k8splus), workload (centroid
-mix — currently `jch_centroids_v01`/`v02`). **Deliberately deferred, not dropped:**
-panic-threshold sweeping. `run_experiment`'s entire reason to exist was sweeping
-`panic_threshold_seconds`across scheduler types via `model_copy` — impossible now that
-schedulers are a discriminated union (a `BatchConfig` cannot become a `K8SConfig`), so
-it's currently a hard `raise NotImplementedError` stub, and `python -m batch_sim
-experiment` is fully broken as a result. BSIM-119/120's first cut should ship the
-workload × scheduler grid only; re-introducing a panic-threshold axis (and the
-pareto-frontier/meta-effect logic that consumes it) is real follow-on scope, not
-something to silently fold in or silently drop.
+mix — currently `jch_centroids_v01`/`v02`). **No longer a sweep axis at all (revised
+since this was first drafted):** panic-threshold sweeping. `run_experiment`'s entire
+reason to exist was sweeping `panic_threshold_seconds` across scheduler types via
+`model_copy` — already impossible once schedulers became a discriminated union (a
+`BatchConfig` cannot become a `K8SConfig`), so it was a hard `raise NotImplementedError`
+stub even before this revision. Since then, the underlying parameter itself was removed
+entirely: `panic_threshold_seconds` modeled a job that's waited too long automatically
+escalating to URGENT priority and forcing a dedicated node, and no such mechanism exists
+in AWS Batch or Kubernetes/Karpenter (both use static, declared-at-creation priority;
+neither escalates by elapsed queue wait) — confirmed by every real run showing
+`pool_panic_trigger_count` at zero. There is nothing left to defer. `run_experiment`
+remains a stub pending E23 (BSIM-119/120's first cut still ships the workload × scheduler
+grid only), but if a sweep axis is wanted later it will need to be something that
+actually exists in a real scheduler — not a resurrection of this one.
 
 ## 2. Required artifacts per (workload, scheduler) run, and layout
 
@@ -76,8 +86,9 @@ Use the post-attic-reorg set (BSIM-122/E21), not `reproduce_all.sh`'s current in
 scheduler that produced it, and it surfaced only because a human eyeballed crash counts
 (K8S crashes-and-retries by design; K8S+ cannot emit a `burst_collision` at all).
 
-**Current state:** `Scorecard` (`metrics/aggregator.py:160-162`) already records
-`scheduler_type`, `panic_threshold_s`, `event_list_path`. **Missing:**
+**Current state:** `Scorecard` (`metrics/aggregator.py`) already records
+`scheduler_type`, `event_list_path` (it also recorded `panic_threshold_s` when this was
+first drafted; removed along with the panic mechanism itself). **Missing:**
 `scheduler_config_path` (two `K8SPlusConfig`s can share `scheduler_type=k8splus` while
 differing in tiers — the type alone doesn't prove which *config* ran) and `seed`.
 
