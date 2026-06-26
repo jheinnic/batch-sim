@@ -43,6 +43,20 @@ that is worth keeping versus what was noise.
 Output: a short design note in `docs/` that the manifest schema (BSIM-119) and the
 canonical manifest (BSIM-121) are built to satisfy. No code.
 
+**Salvage assessment, not just deletion.** E22 deliberately leaves Run-05 (the
+three-form utilization framework: R/A, U1/A, U1/R, U2/R, U3/R ratios, rendered by
+`generate_utilization_charts.py`) untouched — it is reporting logic, not dead scheduler
+code, and retiring it is this epic's call, not E22's. Run-05 is currently broken (a
+stale `cfg_sched.k8s_os_overhead_gb` reference predating BSIM-109's schema split;
+`os_overhead_gb` is the current field), but breakage is a repair question, not grounds
+to drop it by default. This spike must explicitly decide Run-05's fate as part of "what
+`reproduce_all.sh` produced that is worth keeping": repair-and-fold it into the manifest
+artifact set as a defined comparison output, generalize it to run over any
+workload × scheduler pair in the grid (not just the hardcoded `reference_4h_v1`
+workload), or drop it with a stated reason. Carrying it forward unrepaired is not an
+option — the orchestrator (BSIM-120) must not re-platform code that has been silently
+broken since BSIM-109.
+
 **Provenance requirement.** A real incident motivates this: a batch of runs labelled
 `so*-k8splus` were in fact produced by the plain K8S scheduler (the `simulate` command
 omitted the `plus`), and the mislabel went unnoticed until crash counts were eyeballed —
@@ -61,6 +75,8 @@ mismatch is detectable (ideally impossible) rather than silent.
 - Specifies the provenance recorded with each run (scheduler type/config, workload, seed)
   and how the orchestrator detects a name↔run mismatch
 - Explicitly lists what from the old `reproduce_all.sh` is dropped and why
+- States Run-05's disposition by name — repair-and-fold-in, generalize, or drop — with a
+  reason; "drop because broken" without considering repair is not an acceptable reason
 - Reviewed/confirmed before BSIM-119 begins
 
 ---
