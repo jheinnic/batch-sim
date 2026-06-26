@@ -24,16 +24,8 @@ centroids:
       Arrival rate halves overnight then ramps above baseline at 04:00.
       Size mix skews small overnight, shifts toward larger bins in the morning.
 
-    # Required base fields; used as fallback if bin arrays are absent and
-    # by build_phase_profile before bin overrides are applied.
     arrival_rate_per_hour: 40.0
-    pareto_alpha: 2.5
-    download_gb: 8.0
-    preprocess_memory_exponent_a: 1.5
-    preprocess_memory_exponent_b: 1.2
-    preprocess_duration_seconds: 30
     io_wait_fraction: 0.20
-    upload_gb: 2.0
 
     # Burst sizing: 1–3 same-type jobs per deploy event
     burst_size_min: 4

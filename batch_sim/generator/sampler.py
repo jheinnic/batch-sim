@@ -61,10 +61,20 @@ def _sample_job_bin_mode(
         io_wait = float(centroid.io_wait_fraction)
         io_wait_fractions = None
 
+    # preprocess_memory_exponent_{a,b} may be None here: the schema only
+    # requires them when bin_preloader_hard_limit_gb is absent, in which case
+    # the RAM value computed below is immediately overwritten by the bin's
+    # hard limit. The placeholder is never read when that's not the case,
+    # since CentroidConfig's validator would have required real values.
+    preprocess_a = (centroid.preprocess_memory_exponent_a
+                    if centroid.preprocess_memory_exponent_a is not None else 1.0)
+    preprocess_b = (centroid.preprocess_memory_exponent_b
+                    if centroid.preprocess_memory_exponent_b is not None else 1.0)
+
     profile = build_phase_profile(
         download_gb=download_gb,
-        preprocess_a=centroid.preprocess_memory_exponent_a,
-        preprocess_b=centroid.preprocess_memory_exponent_b,
+        preprocess_a=preprocess_a,
+        preprocess_b=preprocess_b,
         preprocess_duration_s=preprocess_duration_s,
         workhorse_cpu_stages=cpu_stages,
         workhorse_hard_vcpu=hard_vcpu,
