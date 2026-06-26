@@ -28,7 +28,6 @@
 #   Covers c7i / m7i / r7i families from xlarge through 16xlarge.
 
 scheduler_type: k8splus
-panic_threshold_seconds: 600
 sla_target_seconds: 300
 warmup_delay_seconds: 60
 idle_timeout_seconds: 300

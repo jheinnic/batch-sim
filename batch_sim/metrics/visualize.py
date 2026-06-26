@@ -24,7 +24,7 @@ def plot_cost_vs_wait(collated, output_dir):
         xs = [r["mean_wait_s"] for r in runs]; ys = [r["total_cost_usd"] for r in runs]
         ax.scatter(xs, ys, color=color, label=label, s=80, zorder=3)
         ax.plot(xs, ys, color=color, alpha=0.5, linewidth=1)
-        for x, y, t in zip(xs, ys, [r["panic_threshold_s"] for r in runs]):
+        for x, y, t in zip(xs, ys, [r["threshold_s"] for r in runs]):
             ax.annotate(f"{int(t)}s", (x, y), textcoords="offset points", xytext=(4,4), fontsize=7, color=color)
     ax.set_xlabel("Mean Queue Wait (s)", fontfamily=FONT); ax.set_ylabel("Total Cost (USD)", fontfamily=FONT)
     ax.set_title("Cost vs Service Quality — Pareto Frontier", fontfamily=FONT)

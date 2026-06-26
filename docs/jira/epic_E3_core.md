@@ -83,6 +83,14 @@ instance becoming available. Track idle time from last job completion to termina
 **Type:** Task | **Priority:** High | **Status:** Done
 **Depends on:** BSIM-14
 
+**Retired (post-merge note):** the entire panic/priority-elevation mechanism
+described below was removed. It had no real-world analog in AWS Batch or
+Kubernetes/Karpenter (neither auto-escalates job priority or forces capacity
+purely as a function of elapsed queue wait — both either use static,
+declared-at-creation priority, or scale up reactively without a long wait
+gate), and every real run showed `pool_panic_trigger_count` at zero. The
+queue is now a plain FIFO-by-arrival-time min-heap with no priority field.
+
 **Description:**
 Implement the shared job queue with priority elevation. When a job's wait time crosses
 the panic threshold, it is elevated to URGENT, a new instance launch is guaranteed if

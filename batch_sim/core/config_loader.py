@@ -5,7 +5,7 @@ from typing import TypeVar, Type
 import yaml
 from pydantic import BaseModel
 from batch_sim.core.schemas import (
-    SimulationConfig, InstanceRegistryConfig, SchedulerConfig, ExperimentConfig,
+    SimulationConfig, InstanceRegistryConfig, SchedulerConfig,
 )
 
 M = TypeVar("M", bound=BaseModel)
@@ -32,6 +32,3 @@ def load_scheduler_config(path: str | Path):
     # the concrete subclass keyed on scheduler_type.
     from pydantic import TypeAdapter
     return TypeAdapter(SchedulerConfig).validate_python(_load_yaml(path))
-
-def load_experiment_config(path: str | Path) -> ExperimentConfig:
-    return load_config(path, ExperimentConfig)

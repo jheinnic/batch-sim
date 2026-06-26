@@ -1,5 +1,12 @@
 # Executive Summary — Batch Compute Platform Evaluation
 
+> **Stale reference numbers.** The cost table below predates two CPU-model bug
+> fixes (`docs/CPU_MODELING.md`) and the removal of the panic-escalation
+> mechanism described in an earlier version of this document (it modeled
+> automatic priority/capacity escalation with no real analog in AWS Batch or
+> Kubernetes/Karpenter). Re-run the reference scenario before citing these
+> numbers in a real decision.
+
 ## The Question
 
 Should we consider replacing AWS Batch with OKD (open-source Kubernetes) for our
@@ -43,9 +50,6 @@ jobs compete for server capacity simultaneously.
    platforms and excluded. OKD has no licensing fee (unlike Red Hat OpenShift).
 3. The simulation models memory collision recovery via automatic job restart
    (up to 3 retries). Zero collisions occurred in the reference run.
-4. The "panic threshold" — the maximum time a job waits before the scheduler is
-   required to guarantee it a server — is set to 300 seconds in the reference run.
-   This is a tunable parameter.
 
 ## Recommendation
 
@@ -60,4 +64,4 @@ The ask is approval to build a prototype — not a migration decision.
 ---
 
 *Simulation source: github.com/jheinnic/batch-sim · Reference run: seed=42, 4-hour
-horizon, 242 jobs, 7 panic threshold values × 2 schedulers = 14 total runs.*
+horizon, 242 jobs, 2 schedulers — see the staleness note above before citing.*

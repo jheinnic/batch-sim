@@ -29,7 +29,8 @@ python -m batch_sim generate \
   --config configs/reference_centroids.yaml \
   --output workloads/reference_4h.json
 
-# Stage 2: run experiment sweep (both schedulers, 7 panic thresholds)
+# Stage 2: run experiment sweep (both schedulers, 7 threshold values)
+# NOTE: currently retired pending E23 orchestration (BSIM-118-121) -- raises NotImplementedError
 python -m batch_sim experiment \
   --events workloads/reference_4h.json \
   --scheduler-config configs/scheduler_reference.yaml \

@@ -12,7 +12,6 @@ from batch_sim.core.schemas import (
     CentroidConfig, K8SConfig, K8SPlusConfig, SchedulerType, InstanceTypeConfig,
     InstanceFamily, InstanceRegistryConfig,
 )
-from batch_sim.core.engine import Priority
 from batch_sim.generator.job_spec import JobSpec, PhaseProfile
 from batch_sim.generator.sampler import sample_job
 from batch_sim.metrics.collector import MetricsCollector, EventType
@@ -45,7 +44,7 @@ def _tiers():
 @pytest.fixture
 def tier_cfg():
     return K8SConfig(
-        panic_threshold_seconds=300.0, sla_target_seconds=600.0,
+        sla_target_seconds=600.0,
         warmup_delay_seconds=1.0, idle_timeout_seconds=30.0,
         max_retries=3, replay_delay_seconds=2.0,
         os_overhead_gb=0.0, scale_out_threshold_s=0.0, scale_out_poll_s=30.0,
@@ -75,7 +74,7 @@ def _provision_once(cfg, registry, jobs, sched_cls=K8SScheduler):
     sched._env = env  # bypass _setup so the scale-out monitor never starts
     for j in jobs:
         sched._job_compatible_tiers[j.job_id] = list(j.compatible_tiers)
-        sched._queue.enqueue(j, arrival_time=0.0, priority=Priority.NORMAL, enqueue_time=0.0)
+        sched._queue.enqueue(j, arrival_time=0.0, enqueue_time=0.0)
     sched._provision_to_demand_joint(env)
     env.run(until=cfg.warmup_delay_seconds + 1.0)
     return Counter(sched._node_tier_name.values()), sched
@@ -167,7 +166,7 @@ class TestPlacementMembership:
         assert not sched._node_compatible("n1", ["medium_boost", "large_boost"])
 
     def test_no_tiers_means_any_node(self, tier_registry):
-        cfg = K8SConfig(panic_threshold_seconds=300.0, sla_target_seconds=600.0)
+        cfg = K8SConfig(sla_target_seconds=600.0)
         sched = K8SScheduler(cfg=cfg, registry=tier_registry, metrics=MetricsCollector(),
                              centroid_peak_rams=[10.0], centroid_tier_config={}, rng=None)
         # legacy mode: no tier_defs → any node compatible regardless of job tiers
@@ -180,9 +179,6 @@ class TestPlacementMembership:
         # burst 60 → only medium(64)/large(128), not small(16)
         job = _make_job(soft_gb=8, burst_gb=60, tiers=["small_boost", "medium_boost", "large_boost"])
         assert sched._viable_tiers(job, job.compatible_tiers) == ["medium_boost", "large_boost"]
-        # _pick_launch_tier chooses the least-wasteful viable tier (smallest spike)
-        sched._job_compatible_tiers[job.job_id] = list(job.compatible_tiers)
-        assert sched._pick_launch_tier(job) == "medium_boost"
 
 
 # ---------------------------------------------------------------------------

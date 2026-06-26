@@ -296,14 +296,6 @@ class TestPerSchedulerConfigSchemas:
         for cls in (BatchConfig, K8SConfig, K8SPlusConfig):
             assert hasattr(cls(), "storage") and hasattr(cls(), "scale_out_poll_s")
 
-    def test_experiment_config_accepts_typed_subclass(self):
-        from batch_sim.core.schemas import ExperimentConfig, K8SConfig
-        ec = ExperimentConfig(event_list_path="x", output_dir="o",
-                              panic_threshold_values=[100.0, 200.0],
-                              base_scheduler_config={"scheduler_type": "k8s", "os_overhead_gb": 3.0})
-        assert type(ec.base_scheduler_config) is K8SConfig
-        assert ec.base_scheduler_config.os_overhead_gb == 3.0
-
     def test_idle_check_interval_seconds_removed(self):
         # BSIM-110: dead field, no longer accepted by any subclass (extra='forbid')
         from batch_sim.core.schemas import BatchConfig, K8SConfig, K8SPlusConfig
