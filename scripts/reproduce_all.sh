@@ -14,10 +14,13 @@
 # Observations reproduced:
 #   RUN-01  Reference v1 workload generation (4h, seed=42)
 #   RUN-02  Batch baseline vs K8S+ baseline (v1 workload)
-#   RUN-03  K8S+ two-queue k-sweep at k={2,3,4} (v2 workload)
-#   RUN-04  Hybrid OKD+Batch sweep: Q1 instance × k (v2 workload)
 #   RUN-05  Utilization metrics: three-form framework (v1 workload)
 #   RUN-06  24-hour diurnal simulation (v1 centroids, diurnal arrivals)
+#
+# RUN-03 (K8S+ two-queue k-sweep) and RUN-04 (hybrid OKD+Batch sweep) were
+# retired under BSIM-E22 — advantage-ratio routing experiments superseded
+# by the E20 tier-compatibility model. Numbering kept as-is rather than
+# renumbered, to avoid rewriting history for a pure-deletion change.
 
 set -euo pipefail
 SEED=42
@@ -77,99 +80,6 @@ python -m batch_sim simulate \
 python -m batch_sim compare \
   --batch results/baselines/batch_v2_scorecard.json \
   --k8s   results/baselines/k8s_v2_scorecard.json
-
-# ── RUN-03: K8S+ two-queue k-sweep (v2 workload) ──────────────────────
-echo ""
-echo "RUN-03: K8S+ two-queue k-sweep (v2 workload)..."
-
-python -m batch_sim experiment \
-  --events workloads/reference_4h_v2.json \
-  --scheduler-config configs/scheduler_reference.yaml \
-  --registry configs/instance_registry.yaml \
-  --output results/k_sweep_v2 \
-  --thresholds "300,300,300" \
-  --seed $SEED
-# Note: threshold is held fixed at 300s here; k-sweep is run separately below
-
-python - << 'PYEOF'
-import sys, json, random
-sys.path.insert(0, '.')
-from batch_sim.core.config_loader import load_simulation_config, load_scheduler_config
-from batch_sim.registry.instance_registry import InstanceRegistry
-from batch_sim.generator.event_list import load_event_list
-from batch_sim.metrics.collector import MetricsCollector
-from batch_sim.core.engine import SimulationEngine
-from batch_sim.scheduler.k8s_plus_two_queue import K8SPlusTwoQueueScheduler
-from batch_sim.metrics.aggregator import build_scorecard
-from pathlib import Path
-import statistics
-
-cfg_sched = load_scheduler_config('configs/scheduler_reference.yaml')
-registry  = InstanceRegistry.from_yaml('configs/instance_registry.yaml')
-el        = load_event_list('workloads/reference_4h_v2.json')
-peaks     = list({e.preprocess_peak_ram_gb for e in el.events})
-results   = []
-
-for k in [2, 3, 4]:
-    metrics = MetricsCollector()
-    sched   = K8SPlusTwoQueueScheduler(cfg=cfg_sched, registry=registry,
-                                        metrics=metrics, centroid_peak_rams=peaks,
-                                        k=k, rng=random.Random(42))
-    eng     = SimulationEngine(scheduler=sched, metrics=metrics, cfg=cfg_sched)
-    eng.run(el); sched.finalize(eng.env)
-    sc = build_scorecard(f'k8s_plus_2q_k{k}', '300s', 'v2',
-                         metrics, sched.accruers, 600,
-                         load_simulation_config('configs/reference_centroids_v2.yaml').horizon_seconds)
-    qr = sched.queue_assignment_report()
-    results.append({'k': k, 'cost': round(sc.cost_summary.total_cost_usd,2),
-                    'jobs': sc.job_stats.pool_job_count,
-                    'crashes': sc.job_stats.pool_crash_count,
-                    'terminal': sc.job_stats.pool_terminal_failure_count,
-                    'q1_pct': qr['summary'].get('q1_pct'),
-                    'q2_pct': qr['summary'].get('q2_pct'),
-                    'q1_cost': qr['q1_cost'], 'q2_cost': qr['q2_cost']})
-    print(f"  k={k}: ${results[-1]['cost']}  jobs={results[-1]['jobs']}  "
-          f"crashes={results[-1]['crashes']}  Q1={results[-1]['q1_pct']}%")
-
-Path('results/k_sweep_v2').mkdir(parents=True, exist_ok=True)
-with open('results/k_sweep_v2/two_queue_results.json','w') as f:
-    json.dump(results, f, indent=2)
-print("  Saved: results/k_sweep_v2/two_queue_results.json")
-PYEOF
-
-# ── RUN-04: Hybrid OKD+Batch sweep ────────────────────────────────────
-echo ""
-echo "RUN-04: Hybrid OKD+Batch sweep (v2 workload, Q1 instances × k)..."
-
-python - << 'PYEOF'
-import sys; sys.path.insert(0,'.')
-from batch_sim.core.config_loader import load_scheduler_config
-from batch_sim.registry.instance_registry import InstanceRegistry
-from batch_sim.experiment_hybrid import run_hybrid_sweep
-
-cfg      = load_scheduler_config('configs/scheduler_reference.yaml')
-registry = InstanceRegistry.from_yaml('configs/instance_registry.yaml')
-
-results = run_hybrid_sweep(
-    event_list_path    = 'workloads/reference_4h_v2.json',
-    cfg                = cfg,
-    registry           = registry,
-    q1_instance_names  = ['r7i.4xlarge', 'r7i.8xlarge', 'r7i.16xlarge'],
-    k_values           = [2, 3, 4],
-    output_dir         = 'results/hybrid_sweep',
-    seed               = 42,
-)
-
-print(f"\n  {len(results)} total runs saved to results/hybrid_sweep/collated.json")
-print(f"  {'Run':<30} {'Combined $':>12} {'OKD%':>7} {'Batch%':>7}")
-print(f"  {'-'*58}")
-for r in results:
-    label = r.get('run_type','') if r.get('q1_instance')=='N/A' \
-            else f"hybrid {r.get('q1_instance')} k={r.get('k')}"
-    odp = r.get('routing',{}).get('q1_pct','-')
-    bap = r.get('routing',{}).get('q2_pct','-')
-    print(f"  {label:<30} ${r['combined_cost']:>11.2f} {str(odp):>7} {str(bap):>7}")
-PYEOF
 
 # ── RUN-05: Utilization metrics ────────────────────────────────────────
 echo ""
@@ -316,15 +226,11 @@ echo ""
 echo "  Output summary:"
 echo "    workloads/                      — event lists (v1, v2, v3)"
 echo "    results/baselines/              — RUN-02 scorecards + comparison"
-echo "    results/k_sweep_v2/             — RUN-03 two-queue k-sweep"
-echo "    results/hybrid_sweep/           — RUN-04 hybrid OKD+Batch sweep"
 echo "    results/utilization_charts/     — RUN-05 utilization metrics + charts"
 echo "    results/node_timelines/         — RUN-06 node lifecycle Gantt charts"
 echo ""
 echo "  Key numbers to verify:"
 echo "    Batch baseline (v2):    ~\$57    K8S+ baseline: ~\$52"
-echo "    Two-queue k=2 (v2):     ~\$260   (two-queue overhead dominates)"
-echo "    Hybrid best case:       see results/hybrid_sweep/collated.json"
 echo "    Utilization R/A:        Batch ~47%  K8S+ ~95%"
 echo "    Utilization U1/A:       both  ~8%"
 echo "==================================================================="
