@@ -238,9 +238,11 @@ def run_and_extract(
                 ))
 
     # ── BSIM-94: per-node storage pool events ─────────────────────────────
+    # pool_opened[nid]      = initial_capacity_gb (Batch only; announced at launch)
     # pool_expanded[nid]    = [(t, old_gb, new_gb)]
     # pool_exhausted[nid]   = True
     # pool_gen_events[nid]  = [(event_type_str, t, gen_id, capacity_gb)]
+    pool_opened:     dict[str, float] = {}
     pool_expanded:   dict[str, list] = {}
     pool_exhausted:  dict[str, bool] = {}
     pool_gen_events: dict[str, list] = {}
@@ -248,7 +250,9 @@ def run_and_extract(
         nid = e.data.get('node_id')
         if not nid:
             continue
-        if e.event_type == EventType.STORAGE_POOL_EXPANDED:
+        if e.event_type == EventType.STORAGE_POOL_OPENED:
+            pool_opened[nid] = e.data.get('capacity_gb', 0.0)
+        elif e.event_type == EventType.STORAGE_POOL_EXPANDED:
             pool_expanded.setdefault(nid, []).append(
                 (e.sim_time, e.data.get('old_gb', 0.0), e.data.get('new_gb', 0.0)))
         elif e.event_type == EventType.STORAGE_EXHAUSTED:
@@ -442,6 +446,7 @@ def run_and_extract(
             'cpu_waste_steps':        sorted(             # BSIM-82
                 node_cpu_waste.get(nid, []), key=lambda x: x[0]
             ),
+            'pool_opened':            pool_opened.get(nid),           # BSIM-94 follow-up
             'pool_expanded':          pool_expanded.get(nid, []),     # BSIM-94
             'pool_exhausted':         pool_exhausted.get(nid, False), # BSIM-94
             'pool_gen_events':        pool_gen_events.get(nid, []),   # BSIM-94
@@ -800,7 +805,7 @@ def _render_overview_page(
     cpu_h   = 1.6
     fig_w   = 18
     has_storage_overview = any(
-        n.get('pool_expanded') or n.get('pool_gen_events')
+        n.get('pool_opened') is not None or n.get('pool_expanded') or n.get('pool_gen_events')
         for _, n in gantt_nodes
     )
     storage_h = 1.2 if has_storage_overview else 0
@@ -966,16 +971,22 @@ def _render_overview_page(
                         all_stor_evts.append((t, +cap_gb))
                     elif ev_type == 'storage_gen_released':
                         all_stor_evts.append((t, -cap_gb))
-            elif expanded_nd:
-                # Initial capacity delta at launch_t
-                init_cap  = expanded_nd[0][1]  # old_gb of first expansion
-                final_cap = expanded_nd[-1][2]  # new_gb of last expansion
-                launch = nd.get('launch_t', t_min)
-                term   = nd.get('term_t',   t_max)
-                all_stor_evts.append((launch, +init_cap))
-                for t_exp, old_gb, new_gb in expanded_nd:
-                    all_stor_evts.append((t_exp, +(new_gb - old_gb)))
-                all_stor_evts.append((term, -final_cap))
+            else:
+                # Initial capacity delta at launch_t: prefer the announced
+                # STORAGE_POOL_OPENED capacity; fall back to inferring it from
+                # the first expansion's old_gb for event logs predating that event.
+                init_cap = nd.get('pool_opened')
+                if init_cap is None and expanded_nd:
+                    init_cap = expanded_nd[0][1]
+                if init_cap is not None:
+                    launch = nd.get('launch_t', t_min)
+                    term   = nd.get('term_t',   t_max)
+                    all_stor_evts.append((launch, +init_cap))
+                    cur = init_cap
+                    for t_exp, old_gb, new_gb in expanded_nd:
+                        all_stor_evts.append((t_exp, +(new_gb - old_gb)))
+                        cur = new_gb
+                    all_stor_evts.append((term, -cur))
         if all_stor_evts:
             all_stor_evts.sort(key=lambda x: x[0])
             ts_stor  = [t_min]
@@ -1098,8 +1109,10 @@ def _build_pool_capacity_steps(
 ) -> tuple[list[float], list[float]]:
     """Return (times, capacity_gb) step series for a single node's pool.
 
-    For the Batch single-pool model: starts at initial capacity (inferred from
-    the first STORAGE_POOL_EXPANDED 'old_gb'), jumps at each expansion.
+    For the Batch single-pool model: starts at initial capacity (from the
+    announced STORAGE_POOL_OPENED event, or inferred from the first
+    STORAGE_POOL_EXPANDED 'old_gb' for older event logs predating that event),
+    jumps at each expansion.
     For K8S generational: accumulated capacity across open generations.
     Uses STORAGE_GEN_OPENED to add capacity and STORAGE_GEN_RELEASED to subtract.
     Falls back to STORAGE_POOL_EXPANDED if no gen events.
@@ -1126,13 +1139,15 @@ def _build_pool_capacity_steps(
         return ts, cap_series
 
     # Batch / single-pool path
-    if not expanded:
-        return [], []
-    # Infer initial capacity from first expansion's old_gb
-    initial_cap = expanded[0][1]   # old_gb at first expansion
-    ts    = [t_min, expanded[0][0]]
-    caps  = [initial_cap, initial_cap]
-    cur   = initial_cap
+    initial_cap = node.get('pool_opened')
+    if initial_cap is None:
+        if not expanded:
+            return [], []
+        initial_cap = expanded[0][1]   # legacy event logs: infer from first expansion's old_gb
+
+    ts   = [t_min]
+    caps = [initial_cap]
+    cur  = initial_cap
     for t, old_gb, new_gb in expanded:
         ts.append(t); caps.append(cur)
         ts.append(t); caps.append(new_gb)
@@ -1236,7 +1251,8 @@ def chart_per_node(
     usage_h = 2.2
     waste_h = 1.8 if has_waste else 0
     fig_w   = 15
-    has_storage = bool(node.get('pool_expanded') or node.get('pool_gen_events'))
+    has_storage = (node.get('pool_opened') is not None
+                   or bool(node.get('pool_expanded')) or bool(node.get('pool_gen_events')))
     storage_h   = 1.4 if has_storage else 0
 
     n_panels    = 2 + (1 if has_waste else 0) + (1 if has_storage else 0)

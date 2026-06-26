@@ -194,9 +194,11 @@ class BatchScheduler:
         self._nodes[node_id] = node
         self._accruers[node_id] = NodeCostAccruer(node_id=node_id, instance=instance, launch_time=env.now)
         if self.cfg.storage is not None:
-            self._storage_pools[node_id] = NodeStoragePool(
+            pool = NodeStoragePool(
                 node_id=node_id, config=self.cfg.storage,
                 instance=instance, open_time=env.now)
+            self._storage_pools[node_id] = pool
+            pool.announce(env.now, self.metrics)
         yield env.timeout(self.cfg.warmup_delay_seconds)
         node.state = NodeStateEnum.READY
         self.metrics.node_ready(env.now, node_id, instance.name)

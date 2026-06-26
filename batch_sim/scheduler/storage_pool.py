@@ -30,6 +30,16 @@ class NodeStoragePool:
     def max_physical_capacity_gb(self) -> float:
         return self.instance.max_ebs_volumes * self.config.volume_size_gb
 
+    def announce(self, t: float, metrics: "MetricsCollector") -> None:
+        """Emit the STORAGE_POOL_OPENED event for this pool's initial capacity.
+
+        __post_init__ sets pool_capacity_gb without metrics, so no event is
+        emitted there. Call this once from _launch_node immediately after pool
+        construction so the chart code has a storage data point even for
+        nodes that never cross the expansion trigger.
+        """
+        metrics.storage_pool_opened(t, self.node_id, self.pool_capacity_gb)
+
     def job_start(self, t: float, job_id: str, workspace_gb: float,
                   metrics: "MetricsCollector") -> None:
         """Allocate thin LV for a starting job; expand pool if threshold crossed."""
