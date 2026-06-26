@@ -25,12 +25,21 @@ Run-04 broken (Run-04 infinite-spins).
   Phase-2 burst-concurrency mechanism that is being *promoted* into the mainline K8S+
   scheduler under BSIM-122 (E20). It is complementary to the tier reservation model, not
   superseded by it.
+- **Run-05 (utilization-charts reporting) and `generate_utilization_charts.py` are out
+  of scope for this epic, full stop.** This epic only prunes Run-03/Run-04 — the dead
+  *scheduler* code and its sweep — never any *reporting* logic. Run-05 is independently
+  broken (a stale `cfg_sched.k8s_os_overhead_gb` reference from before BSIM-109's schema
+  split) and worth keeping, but deciding its fate — repair, generalize, or drop — belongs
+  to E23's salvage assessment (BSIM-118), not here.
 
 This epic is pure deletion plus the `reproduce_all.sh` pruning needed to keep the tree
-green; it has no behavioural effect on the three production schedulers.
+green; it has no behavioural effect on the three production schedulers, and it touches
+no reporting/comparison-output logic.
 
 Depends on: nothing (the removed code is already orphaned from `run_one`).
-Related: BSIM-122 (E20) promotes `burst_pool`; E23 retires `reproduce_all.sh` entirely.
+Related: BSIM-122 (E20) promotes `burst_pool`; E23 retires `reproduce_all.sh` entirely
+and, per BSIM-118, assesses Run-05's utilization-charts framework for salvage rather
+than this epic dropping it by default.
 
 ---
 
