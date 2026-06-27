@@ -40,7 +40,7 @@ from batch_sim.registry.instance_registry import (
     InstanceRegistry, NodeCostAccruer, compute_k8s_capacity, K8SCapacityProfile, workspace_gb
 )
 from batch_sim.core.schemas import InstanceTypeConfig
-from batch_sim.scheduler.storage_pool import GenerationalStoragePool
+from batch_sim.scheduler.storage_pool import GenerationalStoragePool, make_storage_pool
 from batch_sim.scheduler.burst_pool import NodeBurstPool
 
 
@@ -833,9 +833,9 @@ class K8SPlusScheduler:
         self._accruers[node_id] = NodeCostAccruer(
             node_id=node_id, instance=instance, launch_time=env.now)
         if self.cfg.storage is not None:
-            pool = GenerationalStoragePool(
+            pool = make_storage_pool(
                 node_id=node_id, config=self.cfg.storage,
-                instance=instance, open_time=env.now)
+                instance=instance, open_time=env.now, default_cls=GenerationalStoragePool)
             pool.announce(env.now, self.metrics)
             self._storage_pools[node_id] = pool
         yield env.timeout(self.cfg.warmup_delay_seconds)

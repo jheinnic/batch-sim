@@ -8,7 +8,7 @@ from batch_sim.core.schemas import SchedulerConfig
 from batch_sim.generator.job_spec import JobSpec
 from batch_sim.metrics.collector import MetricsCollector, NodeState as NodeStateEnum
 from batch_sim.registry.instance_registry import InstanceRegistry, NodeCostAccruer, workspace_gb
-from batch_sim.scheduler.storage_pool import NodeStoragePool
+from batch_sim.scheduler.storage_pool import NodeStoragePool, make_storage_pool
 
 
 class BatchScheduler:
@@ -39,7 +39,7 @@ class BatchScheduler:
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         pool = self._storage_pools.get(node.node_id)
         if pool is not None:
-            pool.job_exit(workspace_gb(job))
+            pool.job_exit(env.now, job.job_id, workspace_gb(job), self.metrics)
         if node.job_count == 0:
             node.state = NodeStateEnum.IDLE; node.idle_since = env.now
             self.metrics.node_idle(env.now, node.node_id)
@@ -200,9 +200,9 @@ class BatchScheduler:
         self._nodes[node_id] = node
         self._accruers[node_id] = NodeCostAccruer(node_id=node_id, instance=instance, launch_time=env.now)
         if self.cfg.storage is not None:
-            pool = NodeStoragePool(
+            pool = make_storage_pool(
                 node_id=node_id, config=self.cfg.storage,
-                instance=instance, open_time=env.now)
+                instance=instance, open_time=env.now, default_cls=NodeStoragePool)
             self._storage_pools[node_id] = pool
             pool.announce(env.now, self.metrics)
         yield env.timeout(self.cfg.warmup_delay_seconds)

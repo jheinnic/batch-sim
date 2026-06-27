@@ -61,7 +61,7 @@ class TestNodeStoragePoolHasRoomFor:
         pool = NodeStoragePool("n1", _config(), _instance(max_ebs_volumes=2), open_time=0.0)
         pool.job_start(0.0, "j1", 1900.0, m)
         assert pool.has_room_for(100.0) is False
-        pool.job_exit(1900.0)
+        pool.job_exit(1.0, "j1", 1900.0, m)
         assert pool.has_room_for(100.0) is True
 
 

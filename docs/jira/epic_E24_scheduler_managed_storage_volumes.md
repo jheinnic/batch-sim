@@ -36,7 +36,7 @@ Depends on: BSIM-E18 (BSIM-91–94, storage pool mechanics being extended)
 
 ## BSIM-126 — Spike: AWS Batch storage/volume-attachment capability assessment
 
-**Type:** Spike | **Priority:** High | **Status:** To Do
+**Type:** Spike | **Priority:** High | **Status:** Done
 
 **Description:**
 Research whether AWS Batch (EC2 launch type — what this simulator models, not
@@ -87,7 +87,7 @@ as BSIM-127.
 
 ## BSIM-127 — Storage capacity as a real admission constraint for K8S/K8S+
 
-**Type:** Task | **Priority:** High | **Status:** To Do
+**Type:** Task | **Priority:** High | **Status:** Done
 **Depends on:** BSIM-91–94 (E18)
 
 **Description:**
@@ -118,7 +118,7 @@ jobs complete to free room, or the provisioner scales out.
 
 ## BSIM-128 — Per-job dedicated ephemeral storage volumes (selectable alternative model)
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 **Depends on:** BSIM-127
 
 **Description:**
@@ -149,7 +149,7 @@ how much this session's findings turned on storage-model mechanics.
 
 ## BSIM-129 — Apply storage admission constraint to Batch
 
-**Type:** Task | **Priority:** Medium | **Status:** To Do
+**Type:** Task | **Priority:** Medium | **Status:** Done
 **Depends on:** BSIM-126 (resolved — build symmetric check), BSIM-127
 
 **Description:**
