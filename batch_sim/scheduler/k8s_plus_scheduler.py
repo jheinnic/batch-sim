@@ -453,7 +453,7 @@ class K8SPlusScheduler:
             accruer.terminate(env.now)
         pool = self._storage_pools.get(node.node_id)
         if pool is not None:
-            pool.close(env.now)
+            pool.close(env.now, self.metrics)
         self._node_tier_name.pop(node_id, None)
 
     # ------------------------------------------------------------------
@@ -1090,7 +1090,7 @@ class K8SPlusScheduler:
                 accruer.terminate(env.now)
             pool = self._storage_pools.get(node.node_id)
             if pool is not None:
-                pool.close(env.now)
+                pool.close(env.now, self.metrics)
             self._node_tier_name.pop(node.node_id, None)
 
     def cpu_boost(self, env, node, metrics):
@@ -1116,7 +1116,7 @@ class K8SPlusScheduler:
                 if node:
                     node.state = NodeStateEnum.TERMINATED
         for pool in self._storage_pools.values():
-            pool.close(env.now)
+            pool.close(env.now, self.metrics)
 
     def capacity_report(self):
         result = {}

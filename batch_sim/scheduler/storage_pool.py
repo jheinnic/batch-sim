@@ -194,11 +194,24 @@ class GenerationalStoragePool:
         gen = self._generations[0]
         metrics.storage_gen_opened(t, self.node_id, gen.gen_id, gen.capacity_gb, 0.0)
 
-    def close(self, t: float) -> None:
-        """Force-close any still-open generation when the node terminates."""
+    def close(self, t: float, metrics: "MetricsCollector | None" = None) -> None:
+        """Force-close any still-open generation when the node terminates.
+
+        Jobs still running at node termination never reach job_exit's
+        last-job-departs path, so without this their generation's close_time
+        (correct for cost accrual) would never be paired with a
+        STORAGE_GEN_RELEASED event -- leaving chart code that aggregates
+        capacity purely from open/release events to see it as still open
+        forever, plateauing instead of dropping at node termination.
+        """
         for gen in self._generations:
             if not gen.is_closed:
                 gen.close_time = t
+                if metrics is not None:
+                    metrics.storage_gen_released(
+                        t, self.node_id, gen.gen_id, gen.capacity_gb,
+                        gen.close_time - gen.open_time, gen.active_jobs,
+                    )
 
     @property
     def storage_cost_usd(self) -> float:
