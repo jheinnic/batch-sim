@@ -716,8 +716,31 @@ class KarpenterProvisioner(BaseModel):
 # BSIM-91: EBS thin-pool storage cost config
 # ---------------------------------------------------------------------------
 
+class StorageModel(str, Enum):
+    """BSIM-128: which pool abstraction backs a scheduler's storage cost model.
+
+    POOL (default): each scheduler's standard abstraction -- NodeStoragePool
+    (single monotonically-expanding pool) for Batch, GenerationalStoragePool
+    for K8S/K8S+.
+    DEDICATED: per-job dedicated volumes, sized to that job's own workspace_gb,
+    attached at JOB_START and detached at JOB_COMPLETE/CRASH. Node concurrency
+    is bounded directly by max_ebs_volumes -- no thin-pool or generation/
+    overlap bookkeeping. Selectable for any scheduler, for head-to-head
+    comparison against each scheduler's default model.
+    """
+    POOL = "pool"
+    DEDICATED = "dedicated"
+
+
 class StoragePoolConfig(BaseModel):
     """Per-node EBS thin-pool storage configuration shared by Batch and K8S."""
+    model: StorageModel = Field(
+        default=StorageModel.POOL,
+        description=(
+            "BSIM-128: 'pool' (default) uses each scheduler's standard pool "
+            "abstraction; 'dedicated' gives every job its own volume instead."
+        ),
+    )
     initial_volume_count: PositiveInt = Field(
         default=2,
         description="Number of EBS volumes attached at node launch.",

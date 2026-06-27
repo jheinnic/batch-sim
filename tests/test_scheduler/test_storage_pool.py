@@ -39,18 +39,18 @@ class TestNodeStoragePool:
         m = MetricsCollector()
         pool = NodeStoragePool("n1", _config(), _instance(), open_time=0.0)
         pool.job_start(0.0, "j1", 200.0, m)
-        pool.job_exit(200.0)
+        pool.job_exit(1.0, "j1", 200.0, m)
         assert pool.pool_committed_gb == 0.0
 
     def test_committed_two_sequential_jobs(self):
         m = MetricsCollector()
         pool = NodeStoragePool("n1", _config(), _instance(), open_time=0.0)
         pool.job_start(0.0, "j1", 300.0, m)
-        pool.job_exit(300.0)
+        pool.job_exit(1.0, "j1", 300.0, m)
         assert pool.pool_committed_gb == 0.0
         pool.job_start(1.0, "j2", 400.0, m)
         assert pool.pool_committed_gb == 400.0
-        pool.job_exit(400.0)
+        pool.job_exit(2.0, "j2", 400.0, m)
         assert pool.pool_committed_gb == 0.0
 
     def test_capacity_only_increases(self):
@@ -58,7 +58,7 @@ class TestNodeStoragePool:
         pool = NodeStoragePool("n1", _config(), _instance(), open_time=0.0)
         pool.job_start(0.0, "j1", 1700.0, m)  # triggers expansion
         cap_after = pool.pool_capacity_gb
-        pool.job_exit(1700.0)
+        pool.job_exit(1.0, "j1", 1700.0, m)
         assert pool.pool_capacity_gb == cap_after  # commitment fell but capacity stays
 
     def test_expansion_event_at_trigger(self):
@@ -91,7 +91,7 @@ class TestNodeStoragePool:
         cfg = _config(volume_size_gb=1000.0, ebs_price_per_gb_hour=0.0001096)
         pool = NodeStoragePool("n1", cfg, _instance(), open_time=0.0)
         pool.job_start(0.0, "j1", 100.0, m)
-        pool.job_exit(100.0)
+        pool.job_exit(1.0, "j1", 100.0, m)
         pool.close(3600.0)
         # capacity = 2000 GB for 1 hr at 0.0001096/GB/hr
         expected = 2000.0 * 1.0 * 0.0001096
@@ -124,7 +124,7 @@ class TestNodeStoragePool:
 
         # Complete all jobs
         for i in range(4):
-            pool.job_exit(600.0)
+            pool.job_exit(3600.0, f"j{i}", 600.0, m)
         pool.close(7200.0)
 
         # Cost = 3000 GB × 2 hr (7200s) × 0.0001096
@@ -205,14 +205,9 @@ class TestGenerationalStoragePool:
         gen_pool = GenerationalStoragePool("n1", cfg, inst, open_time=0.0)
         node_pool = NodeStoragePool("n1", cfg, inst, open_time=0.0)
         for pool_obj in (gen_pool, node_pool):
-            if isinstance(pool_obj, GenerationalStoragePool):
-                pool_obj.job_start(0.0, "j1", 400.0, m)
-                pool_obj.job_exit(3600.0, "j1", 400.0, m)
-                pool_obj.close(3600.0)
-            else:
-                pool_obj.job_start(0.0, "j1", 400.0, m)
-                pool_obj.job_exit(400.0)
-                pool_obj.close(3600.0)
+            pool_obj.job_start(0.0, "j1", 400.0, m)
+            pool_obj.job_exit(3600.0, "j1", 400.0, m)
+            pool_obj.close(3600.0)
         assert abs(gen_pool.storage_cost_usd - node_pool.storage_cost_usd) < 1e-9
 
     def test_integration_six_large_jobs_two_generations(self):

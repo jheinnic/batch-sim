@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from batch_sim.core.schemas import StorageModel
+
 if TYPE_CHECKING:
     from batch_sim.metrics.collector import MetricsCollector
     from batch_sim.core.schemas import StoragePoolConfig, InstanceTypeConfig
@@ -54,8 +56,16 @@ class NodeStoragePool:
         self.pool_committed_gb += workspace_gb
         self._maybe_expand(t, metrics)
 
-    def job_exit(self, workspace_gb: float) -> None:
-        """Release thin LV when a job completes or crashes."""
+    def job_exit(self, t: float, job_id: str, workspace_gb: float,
+                 metrics: "MetricsCollector") -> None:
+        """Release thin LV when a job completes or crashes.
+
+        t/job_id/metrics are unused here (cost accrual is lazy, driven by
+        pool_capacity_gb and close_time, not per-exit events) but accepted so
+        every pool class shares one job_exit protocol -- needed for
+        DedicatedVolumePool (BSIM-128), which is selectable for any scheduler
+        and does need them.
+        """
         self.pool_committed_gb = max(0.0, self.pool_committed_gb - workspace_gb)
 
     def _maybe_expand(self, t: float, metrics: "MetricsCollector") -> None:
@@ -221,3 +231,81 @@ class GenerationalStoragePool:
     def pool_capacity_gb(self) -> float:
         """Current total capacity across all open generations."""
         return sum(g.capacity_gb for g in self._generations if not g.is_closed)
+
+
+@dataclass
+class DedicatedVolumePool:
+    """BSIM-128: per-job dedicated volumes -- each job gets its own volume sized
+    to its own workspace_gb, attached at job_start and detached at job_exit.
+    No thin-pool or generation/overlap bookkeeping: every volume is always
+    exactly as committed as it is large, by construction, so there is no
+    expansion, no trigger, and no stranded capacity to track. Node concurrency
+    is bounded directly by max_ebs_volumes via has_room_for(), enforced the
+    same way as the other two pool models.
+
+    Selectable for any scheduler via storage.model: dedicated, for head-to-head
+    comparison against that scheduler's default pool abstraction.
+    """
+    node_id: str
+    config: "StoragePoolConfig"
+    instance: "InstanceTypeConfig"
+    open_time: float
+
+    _active: dict = field(init=False, default_factory=dict)   # job_id -> (open_t, size_gb)
+    _closed_cost_usd: float = field(init=False, default=0.0)
+    _close_time: float = field(init=False, default=-1.0)
+
+    def has_room_for(self, workspace_gb: float) -> bool:
+        return len(self._active) < self.instance.max_ebs_volumes
+
+    def announce(self, t: float, metrics: "MetricsCollector") -> None:
+        """No-op: there is no shared initial capacity to announce -- each
+        job's volume is its own, sized only once it actually starts."""
+
+    def job_start(self, t: float, job_id: str, workspace_gb: float,
+                  metrics: "MetricsCollector") -> None:
+        self._active[job_id] = (t, workspace_gb)
+
+    def job_exit(self, t: float, job_id: str, workspace_gb: float,
+                 metrics: "MetricsCollector") -> None:
+        entry = self._active.pop(job_id, None)
+        if entry is None:
+            return
+        open_t, size_gb = entry
+        duration_h = (t - open_t) / 3600.0
+        self._closed_cost_usd += size_gb * duration_h * self.config.ebs_price_per_gb_hour
+
+    def close(self, t: float, metrics: "MetricsCollector | None" = None) -> None:
+        """Force-close any still-active job volumes when the node terminates,
+        accruing their cost up to t (mirrors GenerationalStoragePool.close())."""
+        if self._close_time >= 0:
+            return
+        self._close_time = t
+        for job_id, (open_t, size_gb) in list(self._active.items()):
+            duration_h = (t - open_t) / 3600.0
+            self._closed_cost_usd += size_gb * duration_h * self.config.ebs_price_per_gb_hour
+        self._active.clear()
+
+    @property
+    def storage_cost_usd(self) -> float:
+        return self._closed_cost_usd
+
+    @property
+    def pool_capacity_gb(self) -> float:
+        """Current total capacity across active dedicated volumes. Always
+        exactly equal to pool_committed_gb -- no slack to strand by construction."""
+        return sum(size for _, size in self._active.values())
+
+    @property
+    def pool_committed_gb(self) -> float:
+        return self.pool_capacity_gb
+
+
+def make_storage_pool(node_id: str, config: "StoragePoolConfig", instance: "InstanceTypeConfig",
+                      open_time: float, default_cls: type):
+    """BSIM-128: construct the pool class this node should use. config.model
+    == DEDICATED always uses DedicatedVolumePool regardless of scheduler;
+    POOL (default) uses whichever class the calling scheduler normally
+    defaults to (NodeStoragePool for Batch, GenerationalStoragePool for K8S/K8S+)."""
+    cls = DedicatedVolumePool if config.model == StorageModel.DEDICATED else default_cls
+    return cls(node_id=node_id, config=config, instance=instance, open_time=open_time)
