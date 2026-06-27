@@ -346,8 +346,9 @@ class K8SScheduler:
     def _place_job(self, env: simpy.Environment, entry: QueueEntry) -> bool:
         job = entry.job; p = job.profile
         soft = p.soft_limit_ram_gb; vcpu = (getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu)
+        ws = workspace_gb(job)
         job_tiers = self._job_compatible_tiers.get(job.job_id, [])
-        best = self._best_fit_node(soft, vcpu, job.job_id, job_tiers)
+        best = self._best_fit_node(soft, vcpu, ws, job.job_id, job_tiers)
         if best is None: return False
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += soft; best.allocated_vcpu += vcpu
@@ -361,21 +362,27 @@ class K8SScheduler:
             queue_entry_time=entry.enqueue_time, scheduler=self))
         return True
 
-    def _k8s_fits(self, node: NodeModel, soft_gb: float, vcpu: float) -> bool:
+    def _k8s_fits(self, node: NodeModel, soft_gb: float, vcpu: float,
+                 workspace_gb_needed: float = 0.0) -> bool:
         node_t = self._node_tier_name.get(node.node_id, "")
         cap = self._capacity_cache.get((node.instance.name, node_t))
         if cap is None or cap.effective_schedulable_gb <= 0: return False
-        return (node.allocated_ram_gb + soft_gb <= cap.effective_schedulable_gb
-                and node.allocated_vcpu + vcpu <= node.physical_vcpu)
+        if not (node.allocated_ram_gb + soft_gb <= cap.effective_schedulable_gb
+                and node.allocated_vcpu + vcpu <= node.physical_vcpu):
+            return False
+        pool = self._storage_pools.get(node.node_id)
+        if pool is not None and not pool.has_room_for(workspace_gb_needed):
+            return False
+        return True
 
-    def _best_fit_node(self, soft_gb: float, vcpu: float, job_id: str,
-                       job_tiers: list[str]) -> Optional[NodeModel]:
+    def _best_fit_node(self, soft_gb: float, vcpu: float, workspace_gb_needed: float,
+                       job_id: str, job_tiers: list[str]) -> Optional[NodeModel]:
         candidates = [(node.allocated_ram_gb, node)
             for node in self._nodes.values()
             if node.state == NodeStateEnum.READY
             and self._reserved.get(node.node_id, job_id) == job_id
             and self._node_compatible(node.node_id, job_tiers)
-            and self._k8s_fits(node, soft_gb, vcpu)]
+            and self._k8s_fits(node, soft_gb, vcpu, workspace_gb_needed)]
         if not candidates: return None
         return max(candidates, key=lambda x: x[0])[1]
 
