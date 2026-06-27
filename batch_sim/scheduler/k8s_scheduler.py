@@ -318,7 +318,7 @@ class K8SScheduler:
                 if accruer:
                     accruer.terminate(env.now)
                 if pool is not None:
-                    pool.close(env.now)
+                    pool.close(env.now, self.metrics)
                 self._node_tier_name.pop(node.node_id, None)
             else:
                 node.state = NodeStateEnum.IDLE; node.idle_since = env.now
@@ -668,7 +668,7 @@ class K8SScheduler:
             accruer = self._accruers.get(node.node_id)
             if accruer: accruer.terminate(env.now)
             pool = self._storage_pools.get(node.node_id)
-            if pool is not None: pool.close(env.now)
+            if pool is not None: pool.close(env.now, self.metrics)
             self._node_tier_name.pop(node.node_id, None)
 
     def cpu_boost(self, env: simpy.Environment, node: NodeModel, metrics: MetricsCollector) -> None:
@@ -686,7 +686,7 @@ class K8SScheduler:
         for accruer in self._accruers.values():
             if not accruer.is_terminated: accruer.terminate(env.now)
         for pool in self._storage_pools.values():
-            pool.close(env.now)
+            pool.close(env.now, self.metrics)
 
     def capacity_report(self) -> dict[str, dict[str, Any]]:
         result = {}

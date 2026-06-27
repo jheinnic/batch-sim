@@ -254,3 +254,42 @@ class TestGenerationalStoragePool:
 
         released2 = m.events_of_type(EventType.STORAGE_GEN_RELEASED)
         assert len(released2) == 3
+
+    def test_close_emits_release_for_still_open_generation(self):
+        """Node termination while a generation still has active jobs (e.g. the
+        node hit its TTL) must still emit STORAGE_GEN_RELEASED -- otherwise
+        chart code that aggregates capacity purely from open/release events
+        sees that capacity as never released, plateauing instead of dropping
+        at node termination even though storage_cost_usd (driven by
+        close_time, not the event) was already correct."""
+        m = MetricsCollector()
+        pool = GenerationalStoragePool("n1", _config(), _instance(), open_time=0.0)
+        pool.job_start(0.0, "j1", 500.0, m)  # gen0, job never exits before termination
+        assert len(m.events_of_type(EventType.STORAGE_GEN_RELEASED)) == 0
+
+        pool.close(3600.0, m)
+
+        released = m.events_of_type(EventType.STORAGE_GEN_RELEASED)
+        assert len(released) == 1
+        assert released[0].data["gen_id"] == 0
+        assert released[0].data["capacity_gb"] == 2000.0
+        assert pool._generations[0].close_time == 3600.0
+
+    def test_close_without_metrics_still_sets_close_time(self):
+        """metrics is optional on close() -- cost accrual (driven by close_time)
+        must work even when no metrics collector is passed."""
+        pool = GenerationalStoragePool("n1", _config(), _instance(), open_time=0.0)
+        pool.job_start(0.0, "j1", 500.0, MetricsCollector())
+        pool.close(3600.0)   # no metrics arg
+        assert pool._generations[0].close_time == 3600.0
+        assert pool.storage_cost_usd > 0.0
+
+    def test_close_does_not_double_release_already_closed_generation(self):
+        m = MetricsCollector()
+        pool = GenerationalStoragePool("n1", _config(), _instance(), open_time=0.0)
+        pool.job_start(0.0, "j1", 500.0, m)
+        pool.job_exit(1800.0, "j1", 500.0, m)  # gen0 releases naturally
+        assert len(m.events_of_type(EventType.STORAGE_GEN_RELEASED)) == 1
+
+        pool.close(3600.0, m)  # gen0 already closed -- must not emit a second release
+        assert len(m.events_of_type(EventType.STORAGE_GEN_RELEASED)) == 1
