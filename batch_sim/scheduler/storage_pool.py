@@ -30,6 +30,14 @@ class NodeStoragePool:
     def max_physical_capacity_gb(self) -> float:
         return self.instance.max_ebs_volumes * self.config.volume_size_gb
 
+    def has_room_for(self, workspace_gb: float) -> bool:
+        """BSIM-127: would admitting a job with this workspace exceed the
+        node's storage-exhaustion ceiling? Mirrors the condition _maybe_expand
+        uses internally so a job is never placed somewhere it would only
+        immediately trigger STORAGE_EXHAUSTED."""
+        max_committed = self.config.expansion_trigger_pct * self.max_physical_capacity_gb
+        return self.pool_committed_gb + workspace_gb <= max_committed
+
     def announce(self, t: float, metrics: "MetricsCollector") -> None:
         """Emit the STORAGE_POOL_OPENED event for this pool's initial capacity.
 
@@ -128,6 +136,23 @@ class GenerationalStoragePool:
     @property
     def _current_gen(self) -> _PoolGeneration:
         return self._generations[-1]
+
+    @property
+    def _open_generation_count(self) -> int:
+        return sum(1 for g in self._generations if not g.is_closed)
+
+    def has_room_for(self, workspace_gb: float) -> bool:
+        """BSIM-127: room exists either within the current generation's trigger,
+        or -- if admitting this job would require opening a new generation --
+        if the node has not yet reached its total EBS attachment ceiling across
+        all currently-open generations (each generation holds initial_volume_count
+        volumes for as long as it stays open)."""
+        gen = self._current_gen
+        trigger = self.config.expansion_trigger_pct * gen.capacity_gb
+        if gen.committed_gb + workspace_gb <= trigger:
+            return True
+        max_open_generations = self.instance.max_ebs_volumes // self.config.initial_volume_count
+        return self._open_generation_count < max_open_generations
 
     def job_start(self, t: float, job_id: str, workspace_gb: float,
                   metrics: "MetricsCollector") -> None:

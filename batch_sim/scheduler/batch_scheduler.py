@@ -160,7 +160,8 @@ class BatchScheduler:
     def _place_job(self, env, entry):
         job = entry.job; p = job.profile
         _vcpu = getattr(job, "soft_cpu", 0) or p.workhorse_declared_vcpu
-        best = self._best_fit_node(p.peak_ram_gb, _vcpu, job.job_id)
+        ws = workspace_gb(job)
+        best = self._best_fit_node(p.peak_ram_gb, _vcpu, ws, job.job_id)
         if best is None: return False
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
         best.allocated_ram_gb += p.peak_ram_gb; best.allocated_vcpu += _vcpu
@@ -173,16 +174,21 @@ class BatchScheduler:
             queue_entry_time=entry.enqueue_time, scheduler=self))
         return True
 
-    def _batch_fits(self, node, ram_gb, vcpu):
-        return (node.allocated_ram_gb + ram_gb <= node.physical_ram_gb
-                and node.allocated_vcpu + vcpu <= node.physical_vcpu)
+    def _batch_fits(self, node, ram_gb, vcpu, workspace_gb_needed=0.0):
+        if not (node.allocated_ram_gb + ram_gb <= node.physical_ram_gb
+                and node.allocated_vcpu + vcpu <= node.physical_vcpu):
+            return False
+        pool = self._storage_pools.get(node.node_id)
+        if pool is not None and not pool.has_room_for(workspace_gb_needed):
+            return False
+        return True
 
-    def _best_fit_node(self, ram_gb, vcpu, job_id):
+    def _best_fit_node(self, ram_gb, vcpu, workspace_gb_needed, job_id):
         candidates = [(node.allocated_ram_gb + node.allocated_vcpu, node)
             for node in self._nodes.values()
             if node.state == NodeStateEnum.READY
             and self._reserved.get(node.node_id, job_id) == job_id
-            and self._batch_fits(node, ram_gb, vcpu)]
+            and self._batch_fits(node, ram_gb, vcpu, workspace_gb_needed)]
         if not candidates: return None
         return max(candidates, key=lambda x: x[0])[1]
 

@@ -23,6 +23,7 @@
 | BSIM-E21 | Per-Scheduler Config Schemas | BSIM-109 – BSIM-112, BSIM-114 – BSIM-115, BSIM-123 |
 | BSIM-E22 | Retire Advantage-Ratio Experiments | BSIM-116 – BSIM-117 |
 | BSIM-E23 | Declarative Experiment Orchestration | BSIM-118 – BSIM-121 |
+| BSIM-E24 | Scheduler-Managed Job-Provisioned Storage Volumes | BSIM-126 – BSIM-129 |
 
 ## Files
 
@@ -45,3 +46,4 @@
 - [BSIM-E21: Per-Scheduler Config Schemas](epic_E21_scheduler_config_composition.md)
 - [BSIM-E22: Retire Advantage-Ratio Experiments](epic_E22_retire_advantage_ratio_experiments.md)
 - [BSIM-E23: Declarative Experiment Orchestration](epic_E23_experiment_orchestration.md)
+- [BSIM-E24: Scheduler-Managed Job-Provisioned Storage Volumes](epic_E24_scheduler_managed_storage_volumes.md)

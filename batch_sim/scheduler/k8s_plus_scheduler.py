@@ -750,8 +750,9 @@ class K8SPlusScheduler:
         p = job.profile
         soft = p.soft_limit_ram_gb
         vcpu = job.soft_cpu or p.workhorse_declared_vcpu
+        ws = workspace_gb(job)
         job_tiers = self._job_compatible_tiers.get(job.job_id, [])
-        best = self._best_fit_node(soft, vcpu, job.job_id, job_tiers)
+        best = self._best_fit_node(soft, vcpu, ws, job.job_id, job_tiers)
         if best is None:
             return False
         self._reserved = {k: v for k, v in self._reserved.items() if v != job.job_id}
@@ -776,15 +777,20 @@ class K8SPlusScheduler:
         ))
         return True
 
-    def _k8s_fits(self, node, soft_gb, vcpu):
+    def _k8s_fits(self, node, soft_gb, vcpu, workspace_gb_needed=0.0):
         node_q = self._node_tier_name.get(node.node_id, "")
         cap = self._capacity_cache.get((node.instance.name, node_q))
         if cap is None or cap.effective_schedulable_gb <= 0:
             return False
-        return (node.allocated_ram_gb + soft_gb <= cap.effective_schedulable_gb
-                and node.allocated_vcpu + vcpu <= node.physical_vcpu)
+        if not (node.allocated_ram_gb + soft_gb <= cap.effective_schedulable_gb
+                and node.allocated_vcpu + vcpu <= node.physical_vcpu):
+            return False
+        pool = self._storage_pools.get(node.node_id)
+        if pool is not None and not pool.has_room_for(workspace_gb_needed):
+            return False
+        return True
 
-    def _best_fit_node(self, soft_gb, vcpu, job_id, job_tiers):
+    def _best_fit_node(self, soft_gb, vcpu, workspace_gb_needed, job_id, job_tiers):
         candidates = [
             (node.allocated_ram_gb, node)
             for node in self._nodes.values()
@@ -792,7 +798,7 @@ class K8SPlusScheduler:
             and node.node_id not in self._draining
             and self._reserved.get(node.node_id, job_id) == job_id
             and self._node_compatible(node.node_id, job_tiers)
-            and self._k8s_fits(node, soft_gb, vcpu)
+            and self._k8s_fits(node, soft_gb, vcpu, workspace_gb_needed)
         ]
         if not candidates:
             return None
