@@ -55,10 +55,19 @@ from batch_sim.scheduler.burst_pool import NodeBurstPool
 def run_job_process_plus(
     env, job, node, metrics, burst_pool: NodeBurstPool,
     arrival_time, queue_entry_time, scheduler,
+    download_pool: "simpy.Resource | None" = None,
 ):
     """BSIM-122: Phase 2 is gated by the node's GB-aware NodeBurstPool — multiple
     jobs may boost concurrently as long as their combined burst fits the tier's
-    spike reservation; otherwise they serialise. No crash possible."""
+    spike reservation; otherwise they serialise. No crash possible.
+
+    BSIM-125: download_pool, when configured, is a count-based admission throttle
+    independent of the GB-scaled burst_pool above. A job acquires a slot before
+    downloading and holds it through Phase 2 (bootstrap) -- the slot represents
+    "has unconsumed downloaded data resident on this node," not just "is
+    transferring" -- releasing it together with the burst reservation once
+    bootstrap completes.
+    """
     p = job.profile
     job_id = job.job_id
     start_time = env.now
@@ -69,14 +78,28 @@ def run_job_process_plus(
 
     metrics.job_start(env.now, job_id, job.centroid_id, node.node_id)
 
-    # Phase 1: Download
+    # Phase 1: Download — compete for a download slot first when the throttle
+    # is configured; held through bootstrap, not released at end of download.
+    download_req = None
+    dl_wait_s = 0.0
+    if download_pool is not None:
+        dl_wait_start = env.now
+        download_req = download_pool.request()
+        yield download_req
+        dl_wait_s = env.now - dl_wait_start
+        if dl_wait_s > 0.1:
+            metrics.record(SimEvent(EventType.PHASE_TRANSITION, env.now, {
+                'job_id': job_id, 'phase': 'download_semaphore_wait',
+                'node_id': node.node_id, 'wait_s': round(dl_wait_s, 2)
+            }))
+
     metrics.phase_transition(env.now, job_id, PhaseID.DOWNLOAD, node.node_id)
     node.add_job(job, PhaseID.DOWNLOAD, ram_gb=p.download_ram_gb, vcpu=1.0)
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.download_duration_s)
 
-    # Phase 2: Pre-process — acquire burst headroom first (bounded by the
-    # reservation; never borrows bin-packing space)
+    # Phase 2: Pre-process — acquire burst headroom (bounded by the reservation;
+    # never borrows bin-packing space). The download slot, if any, is still held.
     sem_wait_start = env.now
     yield from burst_pool.acquire(burst_gb)
     sem_wait_s = env.now - sem_wait_start
@@ -93,6 +116,8 @@ def run_job_process_plus(
     scheduler.cpu_boost(env, node, metrics)
     yield env.timeout(p.preprocess_duration_s)
     burst_pool.release(burst_gb)
+    if download_pool is not None:
+        download_pool.release(download_req)
 
     # Phase 3: Workhorse — dynamic timing, same as run_job_process in engine.py
     node.update_phase(job_id, PhaseID.WORKHORSE, ram_gb=p.workhorse_ram_gb, vcpu=0.0)
@@ -140,6 +165,11 @@ def run_job_process_plus(
         'type': 'semaphore_wait', 'job_id': job_id,
         'node_id': node.node_id, 'wait_s': round(sem_wait_s, 2)
     }))
+    if download_pool is not None:
+        metrics.record(SimEvent(EventType.COST_SAMPLE, env.now, {
+            'type': 'download_semaphore_wait', 'job_id': job_id,
+            'node_id': node.node_id, 'wait_s': round(dl_wait_s, 2)
+        }))
     scheduler.on_job_complete(env, node, job)
 
 
@@ -166,6 +196,7 @@ class K8SPlusScheduler:
         self._queue = JobQueue()
         self._nodes: dict[str, NodeModel] = {}
         self._burst_pools: dict[str, NodeBurstPool] = {}
+        self._download_pools: dict[str, simpy.Resource] = {}
         self._accruers: dict[str, NodeCostAccruer] = {}
         self._storage_pools: dict[str, GenerationalStoragePool] = {}
         self._reserved: dict[str, str] = {}
@@ -736,8 +767,10 @@ class K8SPlusScheduler:
         if pool is not None:
             pool.job_start(env.now, job.job_id, workspace_gb(job), self.metrics)
         bp = self._burst_pools[best.node_id]
+        dp = self._download_pools.get(best.node_id)
         env.process(run_job_process_plus(
             env=env, job=job, node=best, metrics=self.metrics, burst_pool=bp,
+            download_pool=dp,
             arrival_time=entry.arrival_time, queue_entry_time=entry.enqueue_time,
             scheduler=self,
         ))
@@ -784,6 +817,10 @@ class K8SPlusScheduler:
             env=env, node_physical_ram_gb=instance.ram_gb,
             os_overhead_gb=self.cfg.os_overhead_gb,
             headroom_gb=cap.spike_headroom_gb)
+        # BSIM-125: count-based download-slot throttle, independent of the
+        # GB-scaled burst pool above. None disables it (unconstrained downloads).
+        if self.cfg.download_slots:
+            self._download_pools[node_id] = simpy.Resource(env, capacity=self.cfg.download_slots)
         if effective_tier:
             self._node_tier_name[node_id] = effective_tier
         self._capacity_cache[(instance.name, effective_tier)] = cap
@@ -1092,12 +1129,19 @@ class K8SPlusScheduler:
         return result
 
     def semaphore_wait_stats(self):
-        """Extract semaphore wait times from the metrics log."""
+        """Extract semaphore (burst-pool) wait times from the metrics log."""
+        return self._wait_stats('semaphore_wait')
+
+    def download_wait_stats(self):
+        """BSIM-125: extract download-slot wait times from the metrics log."""
+        return self._wait_stats('download_semaphore_wait')
+
+    def _wait_stats(self, sample_type: str):
         waits = [
             e.data['wait_s']
             for e in self.metrics.log
             if e.event_type == EventType.COST_SAMPLE
-            and e.data.get('type') == 'semaphore_wait'
+            and e.data.get('type') == sample_type
         ]
         if not waits:
             return {'count': 0, 'mean': 0, 'max': 0, 'nonzero_count': 0}
