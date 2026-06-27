@@ -886,6 +886,19 @@ class K8SPlusConfig(K8SConfig):
             "instance selection and three-TTL node lifecycle management."
         ),
     )
+    download_slots: PositiveInt | None = Field(
+        default=None,
+        description=(
+            "BSIM-125: per-node count-based admission throttle on concurrent "
+            "download-through-bootstrap pipelines, independent of the GB-scaled "
+            "burst (memory) semaphore. A job acquires a download slot before "
+            "downloading and holds it through Phase 2 (bootstrap), releasing it "
+            "together with the burst-pool reservation once bootstrap completes -- "
+            "the slot models 'has unconsumed downloaded data resident,' not just "
+            "'is actively transferring.' None (default) disables the throttle: "
+            "downloads run unconstrained, matching pre-BSIM-125 behaviour."
+        ),
+    )
 
     @model_validator(mode="after")
     def _warn_inert_allowed_instance_types(self) -> "K8SPlusConfig":
